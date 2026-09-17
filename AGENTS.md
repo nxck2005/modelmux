@@ -113,6 +113,10 @@ Code should usually explain itself.
 - Do not add large explanatory comments, architecture documents, READMEs, migration guides, or examples unless the change requires them or the user asks for them.
 - Do not document speculative behavior or hypothetical extension points.
 
+## Communication
+
+- Always use simple english when talking to the user.
+
 ## Before Finishing
 
 Inspect the diff.
