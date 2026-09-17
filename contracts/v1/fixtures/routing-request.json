@@ -29,43 +29,47 @@
     {
       "profile_id": "cheap",
       "capabilities": [
-        "text",
-        "tools"
+        "tools",
+        "text"
       ],
       "reasoning_efforts": null,
       "max_output_tokens": null,
-      "context_limit": 32000
+      "context_limit": 32000,
+      "measured_input_tokens": null
     },
     {
       "profile_id": "normal",
       "capabilities": [
-        "text",
-        "tools"
+        "tools",
+        "text"
       ],
       "reasoning_efforts": null,
       "max_output_tokens": null,
-      "context_limit": 128000
+      "context_limit": 128000,
+      "measured_input_tokens": 42
     },
     {
       "profile_id": "hard",
       "capabilities": [
-        "text",
-        "tools"
+        "tools",
+        "text"
       ],
       "reasoning_efforts": [
         "low",
         "high"
       ],
       "max_output_tokens": null,
-      "context_limit": 200000
+      "context_limit": 200000,
+      "measured_input_tokens": null
     }
   ],
   "required_capabilities": [
     "text"
   ],
   "required_output_tokens": null,
-  "current_input_tokens": 42,
   "safe_to_apply_before_generation": true,
   "history_portable": true,
-  "application_failure_code": null
+  "application_failure_code": null,
+  "rejected_effective": null,
+  "recovery_used": false
 }

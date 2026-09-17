@@ -82,7 +82,8 @@
         "candidate_unavailable",
         "no_compatible_profile",
         "invalid_current",
-        "incomplete_state"
+        "incomplete_state",
+        "recovery_exhausted"
       ],
       "title": "ReasonCode",
       "type": "string"

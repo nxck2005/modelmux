@@ -68,6 +68,7 @@ class ReasonCode(StrEnum):
     NO_COMPATIBLE_PROFILE = "no_compatible_profile"
     INVALID_CURRENT = "invalid_current"
     INCOMPLETE_STATE = "incomplete_state"
+    RECOVERY_EXHAUSTED = "recovery_exhausted"
 
 
 class EffectiveConfiguration(BaseModel):
@@ -85,8 +86,10 @@ class EffectiveConfiguration(BaseModel):
 class ProfileAvailability(BaseModel):
     """Caller-reported availability and factual control support for a profile.
 
-    ``reasoning_efforts``, ``max_output_tokens``, and ``context_limit`` are
-    None when the caller does not know the fact.
+    ``reasoning_efforts``, ``max_output_tokens``, ``context_limit``, and
+    ``measured_input_tokens`` are None when the caller does not know the fact.
+    ``measured_input_tokens`` is a measurement for this profile only and must
+    not be copied from a different model.
     """
 
     model_config = _STRICT
@@ -96,6 +99,7 @@ class ProfileAvailability(BaseModel):
     reasoning_efforts: frozenset[Identifier] | None = None
     max_output_tokens: PositiveInt | None = None
     context_limit: PositiveInt | None = None
+    measured_input_tokens: NonNegativeInt | None = None
 
 
 class RoutingRequest(BaseModel):
@@ -104,6 +108,12 @@ class RoutingRequest(BaseModel):
     Correlation fields are echoed into the decision. A decision is a proposal
     only; the caller owns the actually applied configuration. ``None`` token
     or support facts are unknown, not zero.
+
+    For ``application_failed`` events the caller must identify the effective
+    selection whose application was rejected (``rejected_effective``) and set
+    ``recovery_used=True`` when the failed application was already a
+    compatibility-fallback recovery proposed by the core. The core never
+    re-proposes ``rejected_effective`` and stops once ``recovery_used``.
     """
 
     model_config = _STRICT
@@ -120,10 +130,11 @@ class RoutingRequest(BaseModel):
     available_profiles: tuple[ProfileAvailability, ...] = ()
     required_capabilities: frozenset[Identifier] = frozenset()
     required_output_tokens: PositiveInt | None = None
-    current_input_tokens: NonNegativeInt | None = None
     safe_to_apply_before_generation: bool = True
     history_portable: bool = True
     application_failure_code: Identifier | None = None
+    rejected_effective: EffectiveConfiguration | None = None
+    recovery_used: bool = False
 
     @model_validator(mode="after")
     def _event_requirements(self) -> RoutingRequest:
@@ -131,6 +142,16 @@ class RoutingRequest(BaseModel):
             raise ValueError("new_user_turn requires task_state")
         if self.event_kind is EventKind.TOOL_CONTINUATION and self.current is None:
             raise ValueError("tool_continuation requires a current configuration")
+        if self.event_kind is EventKind.APPLICATION_FAILED:
+            if self.rejected_effective is None:
+                raise ValueError("application_failed requires rejected_effective")
+        else:
+            if self.rejected_effective is not None:
+                raise ValueError(
+                    "rejected_effective requires an application_failed event"
+                )
+            if self.recovery_used:
+                raise ValueError("recovery_used requires an application_failed event")
         if (
             self.application_failure_code is not None
             and self.event_kind is not EventKind.APPLICATION_FAILED
@@ -449,7 +470,19 @@ class Router:
             return self._decision(
                 request, RouteAction.KEEP, ReasonCode.APPLICATION_FAILED, target=current
             )
-        return self._recovery_decision(request, request.task_state, None)
+        if request.recovery_used:
+            return self._decision(
+                request, RouteAction.STOP, ReasonCode.RECOVERY_EXHAUSTED
+            )
+        decision = self._recovery_decision(request, request.task_state, None)
+        if (
+            decision.target is not None
+            and decision.target == request.rejected_effective
+        ):
+            return self._decision(
+                request, RouteAction.STOP, ReasonCode.RECOVERY_EXHAUSTED
+            )
+        return decision
 
     def _judge_failure_decision(
         self, request: RoutingRequest, state: TaskState, reason: ReasonCode
@@ -559,7 +592,7 @@ class Router:
                 return False
 
         context_limit = _known_context_limit(profile, availability)
-        input_tokens = request.current_input_tokens
+        input_tokens = availability.measured_input_tokens
         if context_limit is not None and input_tokens is not None:
             if input_tokens > context_limit:
                 return False

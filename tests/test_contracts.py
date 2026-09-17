@@ -120,3 +120,31 @@ def test_request_failure_code_requires_failure_event() -> None:
             task_state=_state(),
             application_failure_code="provider_rejected",
         )
+
+
+def test_application_failed_requires_rejected_effective() -> None:
+    with pytest.raises(ValidationError):
+        RoutingRequest(
+            request_id="r",
+            integration_instance_id="i",
+            session_id="s",
+            user_turn_id="t",
+            session_revision=1,
+            event_kind="application_failed",
+        )
+
+
+def test_recovery_facts_require_failure_event() -> None:
+    base = {
+        "request_id": "r",
+        "integration_instance_id": "i",
+        "session_id": "s",
+        "user_turn_id": "t",
+        "session_revision": 1,
+        "event_kind": "new_user_turn",
+        "task_state": _state(),
+    }
+    with pytest.raises(ValidationError):
+        RoutingRequest(**base, rejected_effective=_configuration())
+    with pytest.raises(ValidationError):
+        RoutingRequest(**base, recovery_used=True)

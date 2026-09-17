@@ -98,7 +98,7 @@
     },
     "ProfileAvailability": {
       "additionalProperties": false,
-      "description": "Caller-reported availability and factual control support for a profile.\n\n``reasoning_efforts``, ``max_output_tokens``, and ``context_limit`` are\nNone when the caller does not know the fact.",
+      "description": "Caller-reported availability and factual control support for a profile.\n\n``reasoning_efforts``, ``max_output_tokens``, ``context_limit``, and\n``measured_input_tokens`` are None when the caller does not know the fact.\n``measured_input_tokens`` is a measurement for this profile only and must\nnot be copied from a different model.",
       "properties": {
         "profile_id": {
           "minLength": 1,
@@ -157,6 +157,19 @@
           ],
           "default": null,
           "title": "Context Limit"
+        },
+        "measured_input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measured Input Tokens"
         }
       },
       "required": [
@@ -257,7 +270,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "A harness-neutral routing request.\n\nCorrelation fields are echoed into the decision. A decision is a proposal\nonly; the caller owns the actually applied configuration. ``None`` token\nor support facts are unknown, not zero.",
+  "description": "A harness-neutral routing request.\n\nCorrelation fields are echoed into the decision. A decision is a proposal\nonly; the caller owns the actually applied configuration. ``None`` token\nor support facts are unknown, not zero.\n\nFor ``application_failed`` events the caller must identify the effective\nselection whose application was rejected (``rejected_effective``) and set\n``recovery_used=True`` when the failed application was already a\ncompatibility-fallback recovery proposed by the core. The core never\nre-proposes ``rejected_effective`` and stops once ``recovery_used``.",
   "properties": {
     "request_id": {
       "minLength": 1,
@@ -353,19 +366,6 @@
       "default": null,
       "title": "Required Output Tokens"
     },
-    "current_input_tokens": {
-      "anyOf": [
-        {
-          "minimum": 0,
-          "type": "integer"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Current Input Tokens"
-    },
     "safe_to_apply_before_generation": {
       "default": true,
       "title": "Safe To Apply Before Generation",
@@ -388,6 +388,22 @@
       ],
       "default": null,
       "title": "Application Failure Code"
+    },
+    "rejected_effective": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EffectiveConfiguration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "recovery_used": {
+      "default": false,
+      "title": "Recovery Used",
+      "type": "boolean"
     }
   },
   "required": [

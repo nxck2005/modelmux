@@ -165,6 +165,7 @@ def _availability(
     reasoning_efforts: frozenset[str] | None = None,
     max_output_tokens: int | None = None,
     context_limit: int | None = None,
+    measured_input_tokens: int | None = None,
 ) -> tuple[ProfileAvailability, ...]:
     return tuple(
         ProfileAvailability(
@@ -173,6 +174,7 @@ def _availability(
             reasoning_efforts=reasoning_efforts,
             max_output_tokens=max_output_tokens,
             context_limit=context_limit,
+            measured_input_tokens=measured_input_tokens,
         )
         for name in names
     )
@@ -203,10 +205,11 @@ def _request(
     available: tuple[ProfileAvailability, ...] | None = None,
     required: frozenset[str] = frozenset(),
     required_output_tokens: int | None = None,
-    current_input_tokens: int | None = None,
     safe: bool = True,
     history_portable: bool = True,
     application_failure_code: str | None = None,
+    rejected_effective: EffectiveConfiguration | None = None,
+    recovery_used: bool = False,
 ) -> RoutingRequest:
     return RoutingRequest(
         request_id="req-1",
@@ -224,10 +227,11 @@ def _request(
         ),
         required_capabilities=required,
         required_output_tokens=required_output_tokens,
-        current_input_tokens=current_input_tokens,
         safe_to_apply_before_generation=safe,
         history_portable=history_portable,
         application_failure_code=application_failure_code,
+        rejected_effective=rejected_effective,
+        recovery_used=recovery_used,
     )
 
 
@@ -836,8 +840,9 @@ async def test_known_context_limit_rejects_candidate_that_would_overflow() -> No
         normal_context_limit=10000,
     )
     request = _request(
-        current_input_tokens=7000,
-        available=_availability("normal", context_limit=8000),
+        available=_availability(
+            "normal", context_limit=8000, measured_input_tokens=7000
+        ),
     )
 
     decision = await Router(config, judge).route(request)
@@ -846,14 +851,60 @@ async def test_known_context_limit_rejects_candidate_that_would_overflow() -> No
     assert decision.reason_code is ReasonCode.NO_COMPATIBLE_PROFILE
 
 
-async def test_unknown_context_facts_do_not_reject_candidate() -> None:
+async def test_missing_measurement_does_not_reject_candidate() -> None:
     judge = _FakeJudge(_profile_values())
     config = _config(normal_output=OutputLimits(default=2048, max=4096))
 
-    decision = await Router(config, judge).route(_request(current_input_tokens=7000))
+    decision = await Router(config, judge).route(_request())
 
     assert decision.action is RouteAction.SWITCH
     assert decision.reason_code is ReasonCode.DEFAULT_PROFILE
+
+
+async def test_measurement_for_another_profile_does_not_reject_candidate() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+    config = _config(normal_context_limit=8000)
+    request = _request(
+        available=(
+            ProfileAvailability(profile_id="cheap"),
+            ProfileAvailability(
+                profile_id="normal",
+                context_limit=8000,
+                measured_input_tokens=9000,
+            ),
+            ProfileAvailability(profile_id="hard", context_limit=8000),
+        )
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.RULE_MATCH
+    assert decision.target is not None
+    assert decision.target.profile_id == "hard"
+
+
+async def test_measurement_for_another_profile_does_not_invalidate_current() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_context_limit=8000)
+    request = _request(
+        current=_current("normal"),
+        event_kind=EventKind.TOOL_CONTINUATION,
+        available=(
+            ProfileAvailability(profile_id="cheap"),
+            ProfileAvailability(profile_id="normal", context_limit=8000),
+            ProfileAvailability(
+                profile_id="hard",
+                context_limit=8000,
+                measured_input_tokens=9000,
+            ),
+        ),
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.KEEP
+    assert decision.reason_code is ReasonCode.TOOL_CONTINUATION
 
 
 async def test_current_context_overflow_stops_tool_continuation() -> None:
@@ -865,7 +916,7 @@ async def test_current_context_overflow_stops_tool_continuation() -> None:
     request = _request(
         current=_current("normal", output_limit=2048),
         event_kind=EventKind.TOOL_CONTINUATION,
-        current_input_tokens=9000,
+        available=_availability("cheap", "normal", "hard", measured_input_tokens=9000),
     )
 
     decision = await Router(config, judge).route(request)
@@ -892,10 +943,7 @@ async def test_reported_output_ceiling_intersects_with_configuration() -> None:
 async def test_unknown_output_input_overflow_rejects_first_turn_candidate() -> None:
     judge = _FakeJudge(_profile_values())
     config = _config(normal_context_limit=8000)
-    request = _request(
-        current_input_tokens=9000,
-        available=_availability("normal"),
-    )
+    request = _request(available=_availability("normal", measured_input_tokens=9000))
 
     decision = await Router(config, judge).route(request)
 
@@ -906,8 +954,11 @@ async def test_unknown_output_input_overflow_rejects_first_turn_candidate() -> N
 async def test_context_overflow_candidate_uses_compatible_fallback() -> None:
     judge = _FakeJudge(_profile_values())
     config = _config(normal_context_limit=8000)
+    request = _request(
+        available=_availability("cheap", "normal", "hard", measured_input_tokens=9000)
+    )
 
-    decision = await Router(config, judge).route(_request(current_input_tokens=9000))
+    decision = await Router(config, judge).route(request)
 
     assert decision.action is RouteAction.SWITCH
     assert decision.reason_code is ReasonCode.COMPATIBILITY_FALLBACK
@@ -921,7 +972,7 @@ async def test_unknown_output_input_overflow_stops_tool_continuation() -> None:
     request = _request(
         current=_current("normal"),
         event_kind=EventKind.TOOL_CONTINUATION,
-        current_input_tokens=9000,
+        available=_availability("cheap", "normal", "hard", measured_input_tokens=9000),
     )
 
     decision = await Router(config, judge).route(request)
@@ -938,8 +989,8 @@ async def test_unknown_output_input_plus_required_overflow_stops_tool_continuati
     request = _request(
         current=_current("normal"),
         event_kind=EventKind.TOOL_CONTINUATION,
-        current_input_tokens=7500,
         required_output_tokens=1000,
+        available=_availability("cheap", "normal", "hard", measured_input_tokens=7500),
     )
 
     decision = await Router(config, judge).route(request)
@@ -954,7 +1005,7 @@ async def test_unknown_output_with_known_input_that_fits_is_retained() -> None:
     request = _request(
         current=_current("normal"),
         event_kind=EventKind.TOOL_CONTINUATION,
-        current_input_tokens=7000,
+        available=_availability("cheap", "normal", "hard", measured_input_tokens=7000),
     )
 
     decision = await Router(config, judge).route(request)
@@ -969,7 +1020,7 @@ async def test_known_output_at_context_boundary_is_valid() -> None:
     request = _request(
         current=_current("normal", output_limit=1000),
         event_kind=EventKind.TOOL_CONTINUATION,
-        current_input_tokens=7000,
+        available=_availability("cheap", "normal", "hard", measured_input_tokens=7000),
     )
 
     decision = await Router(config, judge).route(request)
@@ -984,7 +1035,7 @@ async def test_first_turn_output_at_context_boundary_is_accepted() -> None:
         normal_output=OutputLimits(default=1000, max=2000),
         normal_context_limit=8000,
     )
-    request = _request(current_input_tokens=7000, available=_availability("normal"))
+    request = _request(available=_availability("normal", measured_input_tokens=7000))
 
     decision = await Router(config, judge).route(request)
 
@@ -999,6 +1050,7 @@ async def test_application_failure_retains_valid_current() -> None:
         current=current,
         event_kind=EventKind.APPLICATION_FAILED,
         application_failure_code="provider_rejected",
+        rejected_effective=_current("normal"),
     )
 
     decision = await Router(_config(), judge).route(request)
@@ -1010,12 +1062,60 @@ async def test_application_failure_retains_valid_current() -> None:
     assert judge.calls == 0
 
 
+async def test_application_failure_recovery_is_bounded() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config()
+    rejected = _current("normal")
+
+    first = await Router(config, judge).route(
+        _request(
+            event_kind=EventKind.APPLICATION_FAILED,
+            rejected_effective=rejected,
+        )
+    )
+
+    assert first.action is RouteAction.SWITCH
+    assert first.reason_code is ReasonCode.COMPATIBILITY_FALLBACK
+    assert first.target is not None
+    assert first.target.profile_id == "hard"
+
+    second = await Router(config, judge).route(
+        _request(
+            event_kind=EventKind.APPLICATION_FAILED,
+            rejected_effective=first.target,
+            recovery_used=True,
+        )
+    )
+
+    assert second.action is RouteAction.STOP
+    assert second.reason_code is ReasonCode.RECOVERY_EXHAUSTED
+    assert second.target is None
+    assert judge.calls == 0
+
+
+async def test_application_failure_never_reproposes_rejected_selection() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(compatibility_fallback="normal")
+
+    decision = await Router(config, judge).route(
+        _request(
+            event_kind=EventKind.APPLICATION_FAILED,
+            rejected_effective=_current("normal"),
+        )
+    )
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.RECOVERY_EXHAUSTED
+    assert judge.calls == 0
+
+
 async def test_application_failure_falls_back_when_current_is_unusable() -> None:
     judge = _FakeJudge(_profile_values())
     request = _request(
         current=_current("normal"),
         event_kind=EventKind.APPLICATION_FAILED,
         available=_availability("cheap", "hard"),
+        rejected_effective=_current("normal"),
     )
 
     decision = await Router(_config(), judge).route(request)
@@ -1024,6 +1124,38 @@ async def test_application_failure_falls_back_when_current_is_unusable() -> None
     assert decision.reason_code is ReasonCode.COMPATIBILITY_FALLBACK
     assert decision.target is not None
     assert decision.target.profile_id == "hard"
+    assert judge.calls == 0
+
+
+async def test_application_failure_respects_unsafe_boundary() -> None:
+    judge = _FakeJudge(_profile_values())
+    request = _request(
+        event_kind=EventKind.APPLICATION_FAILED,
+        rejected_effective=_current("normal"),
+        safe=False,
+    )
+
+    decision = await Router(_config(), judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.UNSAFE_BOUNDARY
+    assert judge.calls == 0
+
+
+async def test_application_failure_respects_bound_history() -> None:
+    judge = _FakeJudge(_profile_values())
+    request = _request(
+        current=_current("normal"),
+        event_kind=EventKind.APPLICATION_FAILED,
+        available=_availability("cheap", "hard"),
+        rejected_effective=_current("normal"),
+        history_portable=False,
+    )
+
+    decision = await Router(_config(hard_provider="provider-b"), judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INCOMPATIBLE_HISTORY
     assert judge.calls == 0
 
 
@@ -1038,6 +1170,7 @@ async def test_application_failure_without_state_vetoes_economy_fallback() -> No
         event_kind=EventKind.APPLICATION_FAILED,
         current=_current("normal"),
         available_profiles=_availability("cheap"),
+        rejected_effective=_current("normal"),
     )
 
     decision = await Router(_config(compatibility_fallback="cheap"), judge).route(

@@ -454,3 +454,62 @@ Remaining gaps (not blockers to the core library, but not done):
 The local control service and CLI from the implementation plan
 (`modelmux validate --config ...`, `modelmux serve --config ...`, loopback
 endpoints). OpenCode integration remains later work.
+
+## Milestone 1 routing repair, session 1 of 3
+
+### Scope
+
+Two routing-correctness fixes: bound application-failure recovery so a
+rejected selection is never re-proposed, and scope input-token measurements to
+the profile/model they describe. This session does not touch Jev, the service,
+CLI, or integrations.
+
+### Fix 1: bounded application-failure recovery
+
+- `RoutingRequest` now requires `rejected_effective` on `application_failed`
+  events, identifying the effective selection whose application failed, and
+  accepts `recovery_used: bool = False`, which the caller sets when the failed
+  application was already a compatibility-fallback recovery proposed by the
+  core. Both facts are rejected on any other event.
+- Router policy for `application_failed`: retain a valid actually-applied
+  current configuration; otherwise propose at most one eligible, safe,
+  history-compatible compatibility fallback; never propose a fallback whose
+  resolved effective configuration equals `rejected_effective`; stop with the
+  new `recovery_exhausted` reason when `recovery_used` is true or that
+  fallback was already rejected. No judge call is made.
+- The Router stays stateless. The caller must return `rejected_effective` and
+  `recovery_used` with each failure report; later service/integration work
+  validates sequencing.
+
+### Fix 2: per-profile input measurements
+
+- Removed `RoutingRequest.current_input_tokens`, which was applied to every
+  candidate. The caller now reports `ProfileAvailability.measured_input_tokens`,
+  a measurement for that profile's provider/model only. Missing applicable
+  measurements stay unknown: they neither reject nor claim a known fit.
+- Input-overflow and output-reservation checks are otherwise unchanged, and no
+  tokenizer, estimate, or live discovery was added.
+- `contracts/v1/` schemas and the request fixture were regenerated for the new
+  request shape.
+
+### Verification
+
+- `uv run pytest -q` passed: 160 tests. New regressions cover bounded recovery
+  (initial rejection, one different fallback, fallback rejection, stop), never
+  re-proposing the rejected selection, retaining a valid current, unsafe and
+  history-incompatible fallbacks, and per-profile measurement scoping
+  (another profile's count never rejects or invalidates, applicable overflow
+  still rejects, missing measurements stay unknown).
+- Mutation check: the two bounded-recovery regressions fail against the
+  pre-repair recovery policy and pass with the fix.
+- `uv run ruff format --check src tests scripts`, `uv run ruff check src tests
+  scripts`, and `uv run mypy` passed (12 source files).
+- `uv run python scripts/generate_contract_schemas.py` and the schema drift
+  test pass.
+- Offline only; no live calls.
+
+### Remaining repair sessions
+
+Repair sessions 2 and 3 remain. This session deliberately leaves Jev
+behavior, application sequencing machinery, the service, CLI, and harness
+integration untouched.
