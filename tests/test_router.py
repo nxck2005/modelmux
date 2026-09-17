@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from modelmux.config import RouterConfig, load_config
+from modelmux.config import OutputLimits, RouterConfig, load_config
 from modelmux.judges import build_judge
 from modelmux.judges.base import JudgeError
 from modelmux.router import (
@@ -70,15 +70,24 @@ class _FakeJudge:
 
 
 def _config(
-    *, deadline_ms: int = 1500, hard_provider: str = "provider-a"
+    *,
+    deadline_ms: int = 1500,
+    hard_provider: str = "provider-a",
+    normal_provider: str = "provider-a",
+    hard_effort: str | None = None,
+    normal_output: OutputLimits | None = None,
+    hard_output: OutputLimits | None = None,
+    normal_context_limit: int | None = None,
+    compatibility_fallback: str = "hard",
+    economy: str = "cheap",
 ) -> RouterConfig:
     return RouterConfig(
         version=1,
         router={
             "default": "normal",
             "judgment_fallback": "normal",
-            "compatibility_fallback": "hard",
-            "economy": "cheap",
+            "compatibility_fallback": compatibility_fallback,
+            "economy": economy,
         },
         judge={"selection": "rules", "deadline_ms": deadline_ms},
         profiles={
@@ -89,16 +98,20 @@ def _config(
                 "capabilities": ["text"],
             },
             "normal": {
-                "provider": "provider-a",
+                "provider": normal_provider,
                 "model": "model-normal",
                 "rank": 1,
                 "capabilities": ["text", "tools"],
+                "output": normal_output,
+                "context_limit": normal_context_limit,
             },
             "hard": {
                 "provider": hard_provider,
                 "model": "model-hard",
                 "rank": 2,
                 "capabilities": ["text", "tools"],
+                "reasoning_effort": hard_effort,
+                "output": hard_output,
             },
         },
         policy={
@@ -146,10 +159,20 @@ def _state(text: str = "do the thing") -> TaskState:
 
 
 def _availability(
-    *names: str, capabilities: frozenset[str] = frozenset({"text", "tools"})
+    *names: str,
+    capabilities: frozenset[str] = frozenset({"text", "tools"}),
+    reasoning_efforts: frozenset[str] | None = None,
+    max_output_tokens: int | None = None,
+    context_limit: int | None = None,
 ) -> tuple[ProfileAvailability, ...]:
     return tuple(
-        ProfileAvailability(profile_id=name, capabilities=capabilities)
+        ProfileAvailability(
+            profile_id=name,
+            capabilities=capabilities,
+            reasoning_efforts=reasoning_efforts,
+            max_output_tokens=max_output_tokens,
+            context_limit=context_limit,
+        )
         for name in names
     )
 
@@ -159,8 +182,16 @@ def _current(
     *,
     provider: str = "provider-a",
     model: str = "model-normal",
+    effort: str | None = None,
+    output_limit: int | None = None,
 ) -> EffectiveConfiguration:
-    return EffectiveConfiguration(profile_id=profile_id, provider=provider, model=model)
+    return EffectiveConfiguration(
+        profile_id=profile_id,
+        provider=provider,
+        model=model,
+        reasoning_effort=effort,
+        output_limit=output_limit,
+    )
 
 
 def _request(
@@ -170,6 +201,8 @@ def _request(
     event_kind: EventKind = EventKind.NEW_USER_TURN,
     available: tuple[ProfileAvailability, ...] | None = None,
     required: frozenset[str] = frozenset(),
+    required_output_tokens: int | None = None,
+    current_input_tokens: int | None = None,
     safe: bool = True,
     history_portable: bool = True,
 ) -> RoutingRequest:
@@ -187,6 +220,8 @@ def _request(
             else _availability("cheap", "normal", "hard")
         ),
         required_capabilities=required,
+        required_output_tokens=required_output_tokens,
+        current_input_tokens=current_input_tokens,
         safe_to_apply_before_generation=safe,
         history_portable=history_portable,
     )
@@ -507,3 +542,340 @@ async def test_end_to_end_offline_scenario() -> None:
     assert decision.target.output_limit == 2048
     assert decision.judge_id == "static"
     assert decision.observation_kind is ObservationKind.HEURISTIC
+
+
+async def test_recovery_fallback_respects_bound_history() -> None:
+    judge = _FakeJudge(_profile_values())
+    request = _request(
+        current=_current("normal"),
+        available=_availability("cheap", "hard"),
+        history_portable=False,
+    )
+
+    decision = await Router(_config(hard_provider="provider-b"), judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INCOMPATIBLE_HISTORY
+    assert decision.continues_with_current is False
+
+
+async def test_judge_failure_fallback_respects_bound_history() -> None:
+    judge = _FakeJudge(error=JudgeError("unavailable"))
+    request = _request(
+        current=_current("hard", model="model-hard"),
+        available=_availability("cheap", "normal"),
+        history_portable=False,
+    )
+
+    decision = await Router(_config(normal_provider="provider-b"), judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INCOMPATIBLE_HISTORY
+
+
+async def test_recovery_fallback_stops_when_boundary_unsafe() -> None:
+    judge = _FakeJudge(_profile_values())
+    request = _request(
+        current=_current("normal"),
+        available=_availability("cheap", "hard"),
+        safe=False,
+    )
+
+    decision = await Router(_config(), judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.UNSAFE_BOUNDARY
+    assert decision.continues_with_current is False
+
+
+async def test_current_model_mismatch_uses_recovery_fallback() -> None:
+    judge = _FakeJudge(_profile_values())
+
+    decision = await Router(_config(), judge).route(
+        _request(current=_current("normal", model="not-in-catalog"))
+    )
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.COMPATIBILITY_FALLBACK
+    assert decision.target is not None
+    assert decision.target.profile_id == "hard"
+
+
+async def test_current_model_mismatch_stops_tool_continuation() -> None:
+    judge = _FakeJudge(_profile_values())
+    request = _request(
+        current=_current("normal", model="not-in-catalog"),
+        event_kind=EventKind.TOOL_CONTINUATION,
+    )
+
+    decision = await Router(_config(), judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INVALID_CURRENT
+    assert judge.calls == 0
+
+
+async def test_current_effort_mismatch_stops_tool_continuation() -> None:
+    judge = _FakeJudge(_profile_values())
+    request = _request(
+        current=_current("normal", effort="high"),
+        event_kind=EventKind.TOOL_CONTINUATION,
+    )
+
+    decision = await Router(_config(), judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INVALID_CURRENT
+
+
+async def test_current_output_within_ceiling_is_valid() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_output=OutputLimits(default=1024, max=4096))
+    request = _request(
+        current=_current("normal", output_limit=3000),
+        event_kind=EventKind.TOOL_CONTINUATION,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.KEEP
+    assert decision.reason_code is ReasonCode.TOOL_CONTINUATION
+
+
+async def test_current_output_above_ceiling_stops_tool_continuation() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_output=OutputLimits(default=1024, max=4096))
+    request = _request(
+        current=_current("normal", output_limit=5000),
+        event_kind=EventKind.TOOL_CONTINUATION,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INVALID_CURRENT
+
+
+async def test_current_output_below_explicit_requirement_stops() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_output=OutputLimits(default=1024, max=4096))
+    request = _request(
+        current=_current("normal", output_limit=3000),
+        event_kind=EventKind.TOOL_CONTINUATION,
+        required_output_tokens=4000,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INVALID_CURRENT
+
+
+async def test_escalation_does_not_downgrade_via_fallback() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+
+    decision = await Router(_config(compatibility_fallback="cheap"), judge).route(
+        _request(
+            current=_current("normal"),
+            available=_availability("cheap", "normal"),
+        )
+    )
+
+    assert decision.action is RouteAction.DEFER
+    assert decision.reason_code is ReasonCode.CANDIDATE_UNAVAILABLE
+    assert decision.target is None
+    assert decision.continues_with_current is True
+
+
+async def test_escalation_does_not_switch_to_equal_rank_fallback() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+    config = _config(compatibility_fallback="normal")
+
+    decision = await Router(config, judge).route(
+        _request(
+            current=_current("normal"),
+            available=_availability("cheap", "normal"),
+        )
+    )
+
+    assert decision.action is RouteAction.DEFER
+    assert decision.reason_code is ReasonCode.CANDIDATE_UNAVAILABLE
+    assert decision.continues_with_current is True
+
+
+async def test_escalation_fallback_respects_bound_history() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+    config = _config(compatibility_fallback="normal", normal_provider="provider-b")
+    request = _request(
+        current=_current("cheap", model="model-cheap"),
+        available=_availability("cheap", "normal"),
+        history_portable=False,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.DEFER
+    assert decision.reason_code is ReasonCode.CANDIDATE_UNAVAILABLE
+
+
+async def test_invalid_current_recovers_with_lower_rank_fallback() -> None:
+    judge = _FakeJudge(_profile_values())
+
+    decision = await Router(_config(compatibility_fallback="cheap"), judge).route(
+        _request(current=_current("normal"), available=_availability("cheap"))
+    )
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.COMPATIBILITY_FALLBACK
+    assert decision.target is not None
+    assert decision.target.profile_id == "cheap"
+
+
+async def test_incomplete_state_blocks_economy_compatibility_fallback() -> None:
+    judge = _FakeJudge(_profile_values())
+    incomplete = _state().model_copy(update={"history_omitted": 1})
+    request = _request(incomplete, available=_availability("cheap", "hard"))
+
+    decision = await Router(_config(compatibility_fallback="cheap"), judge).route(
+        request
+    )
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.NO_COMPATIBLE_PROFILE
+
+
+async def test_incomplete_state_blocks_escalating_economy_fallback() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+    incomplete = _state().model_copy(update={"history_omitted": 1})
+    config = _config(compatibility_fallback="normal", economy="normal")
+    request = _request(
+        incomplete,
+        current=_current("cheap", model="model-cheap"),
+        available=_availability("cheap", "normal"),
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.DEFER
+    assert decision.reason_code is ReasonCode.CANDIDATE_UNAVAILABLE
+    assert decision.continues_with_current is True
+
+
+async def test_judge_failure_keeps_applied_economy_route() -> None:
+    judge = _FakeJudge(error=JudgeError("unavailable"))
+    incomplete = _state().model_copy(update={"history_omitted": 1})
+    current = _current("cheap", model="model-cheap")
+
+    decision = await Router(_config(), judge).route(
+        _request(incomplete, current=current)
+    )
+
+    assert decision.action is RouteAction.KEEP
+    assert decision.reason_code is ReasonCode.JUDGE_UNAVAILABLE
+    assert decision.target == current
+
+
+async def test_unknown_effort_support_is_not_rejected() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+
+    decision = await Router(_config(hard_effort="high"), judge).route(_request())
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.target is not None
+    assert decision.target.profile_id == "hard"
+
+
+async def test_candidate_rejected_for_unsupported_effort() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+    request = _request(
+        available=_availability(
+            "cheap", "normal", "hard", reasoning_efforts=frozenset({"low"})
+        )
+    )
+
+    decision = await Router(_config(hard_effort="high"), judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.NO_COMPATIBLE_PROFILE
+
+
+async def test_required_output_above_ceiling_rejects_candidate() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+    config = _config(hard_output=OutputLimits(default=2048, max=4096))
+
+    decision = await Router(config, judge).route(_request(required_output_tokens=8000))
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.NO_COMPATIBLE_PROFILE
+
+
+async def test_required_output_raises_effective_limit_within_ceiling() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_output=OutputLimits(default=1024, max=4096))
+
+    decision = await Router(config, judge).route(_request(required_output_tokens=3000))
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.DEFAULT_PROFILE
+    assert decision.target is not None
+    assert decision.target.output_limit == 3000
+
+
+async def test_known_context_limit_rejects_candidate_that_would_overflow() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(
+        normal_output=OutputLimits(default=2048, max=4096),
+        normal_context_limit=10000,
+    )
+    request = _request(
+        current_input_tokens=7000,
+        available=_availability("normal", context_limit=8000),
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.NO_COMPATIBLE_PROFILE
+
+
+async def test_unknown_context_facts_do_not_reject_candidate() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_output=OutputLimits(default=2048, max=4096))
+
+    decision = await Router(config, judge).route(_request(current_input_tokens=7000))
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.DEFAULT_PROFILE
+
+
+async def test_current_context_overflow_stops_tool_continuation() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(
+        normal_output=OutputLimits(default=2048, max=4096),
+        normal_context_limit=10000,
+    )
+    request = _request(
+        current=_current("normal", output_limit=2048),
+        event_kind=EventKind.TOOL_CONTINUATION,
+        current_input_tokens=9000,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INVALID_CURRENT
+
+
+async def test_reported_output_ceiling_intersects_with_configuration() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_output=OutputLimits(default=1024, max=8192))
+    request = _request(
+        current=_current("normal", output_limit=4096),
+        event_kind=EventKind.TOOL_CONTINUATION,
+        available=_availability("cheap", "normal", "hard", max_output_tokens=2048),
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INVALID_CURRENT

@@ -232,3 +232,65 @@ generation, HTTP service, CLI, and harness integration remain unimplemented.
 `JevTaskJudge` with an injected async client, explicit credential resolution,
 and deadline failure mapping, plus application-failure routing. After that:
 the versioned local service and CLI.
+
+## Milestone 1C review repair
+
+### Scope
+
+Fix five review findings in the routing core: history and safe-boundary checks
+on every proposed switch, validation of the actual current configuration,
+escalation-only fallback behavior, the incomplete-state economy veto on
+fallbacks, and factual compatibility checks for effort support, output
+ceilings, and context limits. No Jev, service, CLI, or harness work.
+
+### Behavior changes
+
+- Every proposed switch now passes the same safe-boundary and history checks,
+  including compatibility and judgment fallbacks. When the current
+  configuration is unusable and the fallback switch is unsafe or
+  history-incompatible, the router stops instead of deferring with an
+  unusable route.
+- The current effective configuration is validated against the configured
+  profile (provider, model, effort), availability, required capabilities,
+  output bounds, and context facts before it can be retained. Effective output
+  limits may differ from the configured default but must stay within the known
+  ceiling. Invalid current routes stop tool continuations without rejudging or
+  switching, and use recovery or the judgment fallback on new turns.
+- A compatibility fallback may not downgrade a valid current configuration or
+  cause an equal-rank switch; it only escalates relative to the current route
+  when the candidate is unavailable. Recovery from an unusable current
+  configuration may still use a lower-rank fallback.
+- The incomplete-state economy veto applies to compatibility and judgment
+  fallback proposals, not only the original candidate. A compatible
+  already-applied economy route is still retained on judge failure.
+- `ProfileAvailability` may carry factual `reasoning_efforts`,
+  `max_output_tokens`, and `context_limit`; `RoutingRequest` may carry
+  `required_output_tokens` and `current_input_tokens`. Unknown facts stay
+  `None` and never cause a positive rejection, and known incompatibilities
+  reject candidates, current configurations, and fallbacks alike. Required
+  output raises the resolved effective limit within the known ceiling and is
+  never silently shrunk. Context checks reserve the effective output limit and
+  use only caller-supplied token facts, never the bounded judge state.
+
+### Verification
+
+- `uv run pytest -q` passed: 106 tests. New regression tests cover the five
+  findings, known-incompatible versus unknown facts, both judge-success and
+  judge-failure fallback history restrictions, and invalid current
+  configuration during tool continuation.
+- `uv run ruff format --check src tests` passed.
+- `uv run ruff check src tests` passed.
+- `uv run mypy` passed (10 source files).
+- No live API, network, coverage, or integration checks were run.
+
+### Remaining milestone work
+
+- `EffectiveConfiguration` cannot distinguish "no explicit output limit" from
+  "unknown output limit"; `None` is treated as unknown and is never checked
+  against context or requirement facts.
+- Context and output fit depend on caller-supplied facts. There is no
+  tokenizer, no live discovery, and no inference from the judge state.
+- Application-failure events, per-session sequencing, acknowledgments, TTL
+  state, config digests, notifications, and usage/cost remain deferred.
+- Jev, the local service, CLI, and harness integration are still
+  unimplemented, so Milestone 1 is not complete.

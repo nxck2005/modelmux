@@ -74,9 +74,14 @@ model.
 `RouteDecision` with action `keep`, `switch`, `defer`, or `stop`. Decisions are
 proposals: the caller applies the resolved target and owns the result. A
 profile is eligible only when it is configured and the caller reports it
-available with the required capabilities. Ineligible candidates use one
-checked compatibility fallback; a judge failure retains the current route or
-uses the judgment fallback; tool continuations bypass the judge.
+available with the required capabilities and any known effort, output-ceiling,
+and context facts; unknown facts are not treated as verified. Before retaining
+a current configuration the router validates its provider, model, effort, and
+effective output limit against the configured profile and reported facts.
+Ineligible candidates use one checked compatibility fallback, which may not
+downgrade or replace a valid current route; a judge failure retains the
+current route or uses the judgment fallback; tool continuations bypass the
+judge.
 
 ```python
 from modelmux.config import load_config

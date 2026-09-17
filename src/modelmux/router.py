@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from modelmux.config import ModelProfile, RouterConfig
+from modelmux.config import ModelProfile, PositiveInt, RouterConfig
 from modelmux.judges.base import JudgeError, TaskJudge
 from modelmux.policy import match_rule
 from modelmux.types import (
@@ -73,23 +73,31 @@ class EffectiveConfiguration(BaseModel):
     provider: Identifier
     model: Identifier
     reasoning_effort: Identifier | None = None
-    output_limit: NonNegativeInt | None = None
+    output_limit: PositiveInt | None = None
 
 
 class ProfileAvailability(BaseModel):
-    """Caller-reported availability and capabilities for one profile."""
+    """Caller-reported availability and factual control support for a profile.
+
+    ``reasoning_efforts``, ``max_output_tokens``, and ``context_limit`` are
+    None when the caller does not know the fact.
+    """
 
     model_config = _STRICT
 
     profile_id: Identifier
     capabilities: frozenset[Identifier] = frozenset()
+    reasoning_efforts: frozenset[Identifier] | None = None
+    max_output_tokens: PositiveInt | None = None
+    context_limit: PositiveInt | None = None
 
 
 class RoutingRequest(BaseModel):
     """A harness-neutral routing request.
 
     Correlation fields are echoed into the decision. A decision is a proposal
-    only; the caller owns the actually applied configuration.
+    only; the caller owns the actually applied configuration. ``None`` token
+    or support facts are unknown, not zero.
     """
 
     model_config = _STRICT
@@ -103,6 +111,8 @@ class RoutingRequest(BaseModel):
     current: EffectiveConfiguration | None = None
     available_profiles: tuple[ProfileAvailability, ...] = ()
     required_capabilities: frozenset[Identifier] = frozenset()
+    required_output_tokens: PositiveInt | None = None
+    current_input_tokens: NonNegativeInt | None = None
     safe_to_apply_before_generation: bool = True
     history_portable: bool = True
 
@@ -163,9 +173,13 @@ class Router:
             async with asyncio.timeout(self._config.judge.deadline_ms / 1000):
                 result = await self._judge.evaluate(state)
         except TimeoutError:
-            return self._judge_failure_decision(request, ReasonCode.JUDGE_TIMEOUT)
+            return self._judge_failure_decision(
+                request, state, ReasonCode.JUDGE_TIMEOUT
+            )
         except JudgeError:
-            return self._judge_failure_decision(request, ReasonCode.JUDGE_UNAVAILABLE)
+            return self._judge_failure_decision(
+                request, state, ReasonCode.JUDGE_UNAVAILABLE
+            )
         return self._turn_decision(request, state, result)
 
     def _turn_decision(
@@ -198,21 +212,22 @@ class Router:
 
         if request.current is None:
             return self._first_decision(
-                request, candidate_id, reason, matched_rule_id, result
+                request, state, candidate_id, reason, matched_rule_id, result
             )
         return self._active_decision(
-            request, candidate_id, reason, matched_rule_id, result
+            request, state, candidate_id, reason, matched_rule_id, result
         )
 
     def _first_decision(
         self,
         request: RoutingRequest,
+        state: TaskState,
         candidate_id: str,
         reason: ReasonCode,
         matched_rule_id: str | None,
         result: JudgeResult,
     ) -> RouteDecision:
-        if self._eligible(candidate_id, request) is not None:
+        if self._profile_compatible(candidate_id, request) is not None:
             if not request.safe_to_apply_before_generation:
                 return self._decision(
                     request, RouteAction.STOP, ReasonCode.UNSAFE_BOUNDARY, result=result
@@ -222,7 +237,9 @@ class Router:
             )
 
         fallback_id = self._config.router.compatibility_fallback
-        if self._eligible(fallback_id, request) is not None:
+        if self._fallback_allowed(state, fallback_id) and self._profile_compatible(
+            fallback_id, request
+        ):
             if not request.safe_to_apply_before_generation:
                 return self._decision(
                     request, RouteAction.STOP, ReasonCode.UNSAFE_BOUNDARY, result=result
@@ -241,6 +258,7 @@ class Router:
     def _active_decision(
         self,
         request: RoutingRequest,
+        state: TaskState,
         candidate_id: str,
         reason: ReasonCode,
         matched_rule_id: str | None,
@@ -248,8 +266,8 @@ class Router:
     ) -> RouteDecision:
         current = request.current
         assert current is not None
-        if self._eligible(current.profile_id, request) is None:
-            return self._compatibility_decision(request, result)
+        if not self._current_valid(request):
+            return self._recovery_decision(request, state, result)
 
         current_profile = self._config.profiles[current.profile_id]
         candidate_profile = self._config.profiles[candidate_id]
@@ -263,55 +281,74 @@ class Router:
                 result=result,
             )
 
-        if self._eligible(candidate_id, request) is None:
-            fallback_id = self._config.router.compatibility_fallback
-            fallback_profile = self._eligible(fallback_id, request)
-            if fallback_profile is not None and self._switch_safe(
-                request, current, fallback_profile
-            ):
-                return self._proposal(
+        if self._profile_compatible(candidate_id, request) is not None:
+            if not request.safe_to_apply_before_generation:
+                return self._decision(
                     request,
-                    fallback_id,
-                    ReasonCode.COMPATIBILITY_FALLBACK,
-                    matched_rule_id,
-                    result,
+                    RouteAction.DEFER,
+                    ReasonCode.UNSAFE_BOUNDARY,
+                    matched_rule_id=matched_rule_id,
+                    result=result,
                 )
-            return self._decision(
-                request,
-                RouteAction.DEFER,
-                ReasonCode.CANDIDATE_UNAVAILABLE,
-                matched_rule_id=matched_rule_id,
-                result=result,
+            if not self._history_compatible(request, current, candidate_profile):
+                return self._decision(
+                    request,
+                    RouteAction.DEFER,
+                    ReasonCode.INCOMPATIBLE_HISTORY,
+                    matched_rule_id=matched_rule_id,
+                    result=result,
+                )
+            return self._proposal(
+                request, candidate_id, ReasonCode.ESCALATED, matched_rule_id, result
             )
 
-        if not request.safe_to_apply_before_generation:
-            return self._decision(
+        fallback_id = self._config.router.compatibility_fallback
+        fallback_profile = self._config.profiles.get(fallback_id)
+        if (
+            fallback_profile is not None
+            and fallback_profile.rank > current_profile.rank
+            and self._fallback_allowed(state, fallback_id)
+            and self._profile_compatible(fallback_id, request) is not None
+            and self._switch_safe(request, current, fallback_profile)
+        ):
+            return self._proposal(
                 request,
-                RouteAction.DEFER,
-                ReasonCode.UNSAFE_BOUNDARY,
-                matched_rule_id=matched_rule_id,
-                result=result,
+                fallback_id,
+                ReasonCode.COMPATIBILITY_FALLBACK,
+                matched_rule_id,
+                result,
             )
-        if not self._history_compatible(request, current, candidate_profile):
-            return self._decision(
-                request,
-                RouteAction.DEFER,
-                ReasonCode.INCOMPATIBLE_HISTORY,
-                matched_rule_id=matched_rule_id,
-                result=result,
-            )
-        return self._proposal(
-            request, candidate_id, ReasonCode.ESCALATED, matched_rule_id, result
+        return self._decision(
+            request,
+            RouteAction.DEFER,
+            ReasonCode.CANDIDATE_UNAVAILABLE,
+            matched_rule_id=matched_rule_id,
+            result=result,
         )
 
-    def _compatibility_decision(
-        self, request: RoutingRequest, result: JudgeResult
+    def _recovery_decision(
+        self,
+        request: RoutingRequest,
+        state: TaskState,
+        result: JudgeResult,
     ) -> RouteDecision:
         fallback_id = self._config.router.compatibility_fallback
-        if self._eligible(fallback_id, request) is not None:
+        fallback_profile = self._config.profiles.get(fallback_id)
+        if (
+            fallback_profile is not None
+            and self._fallback_allowed(state, fallback_id)
+            and self._profile_compatible(fallback_id, request) is not None
+        ):
             if not request.safe_to_apply_before_generation:
                 return self._decision(
                     request, RouteAction.STOP, ReasonCode.UNSAFE_BOUNDARY, result=result
+                )
+            if not self._history_compatible(request, request.current, fallback_profile):
+                return self._decision(
+                    request,
+                    RouteAction.STOP,
+                    ReasonCode.INCOMPATIBLE_HISTORY,
+                    result=result,
                 )
             return self._proposal(
                 request, fallback_id, ReasonCode.COMPATIBILITY_FALLBACK, None, result
@@ -323,7 +360,7 @@ class Router:
     def _continuation_decision(self, request: RoutingRequest) -> RouteDecision:
         current = request.current
         assert current is not None
-        if self._eligible(current.profile_id, request) is None:
+        if not self._current_valid(request):
             return self._decision(request, RouteAction.STOP, ReasonCode.INVALID_CURRENT)
         return self._decision(
             request,
@@ -333,20 +370,26 @@ class Router:
         )
 
     def _judge_failure_decision(
-        self, request: RoutingRequest, reason: ReasonCode
+        self, request: RoutingRequest, state: TaskState, reason: ReasonCode
     ) -> RouteDecision:
         current = request.current
-        if (
-            current is not None
-            and self._eligible(current.profile_id, request) is not None
-        ):
+        if current is not None and self._current_valid(request):
             return self._decision(request, RouteAction.KEEP, reason, target=current)
 
         fallback_id = self._config.router.judgment_fallback
-        if self._eligible(fallback_id, request) is not None:
+        fallback_profile = self._config.profiles.get(fallback_id)
+        if (
+            fallback_profile is not None
+            and self._fallback_allowed(state, fallback_id)
+            and self._profile_compatible(fallback_id, request) is not None
+        ):
             if not request.safe_to_apply_before_generation:
                 return self._decision(
                     request, RouteAction.STOP, ReasonCode.UNSAFE_BOUNDARY
+                )
+            if not self._history_compatible(request, current, fallback_profile):
+                return self._decision(
+                    request, RouteAction.STOP, ReasonCode.INCOMPATIBLE_HISTORY
                 )
             return self._proposal(
                 request, fallback_id, ReasonCode.JUDGMENT_FALLBACK, None, None
@@ -355,48 +398,118 @@ class Router:
             request, RouteAction.STOP, ReasonCode.NO_COMPATIBLE_PROFILE
         )
 
-    def _eligible(
+    def _current_valid(self, request: RoutingRequest) -> bool:
+        current = request.current
+        if current is None:
+            return False
+        profile = self._config.profiles.get(current.profile_id)
+        if profile is None:
+            return False
+        availability = self._availability(current.profile_id, request)
+        if availability is None:
+            return False
+        if current.provider != profile.provider or current.model != profile.model:
+            return False
+        if current.reasoning_effort != profile.reasoning_effort:
+            return False
+        return self._settings_compatible(
+            profile, availability, request, output_limit=current.output_limit
+        )
+
+    def _profile_compatible(
         self, profile_id: str, request: RoutingRequest
     ) -> ModelProfile | None:
         profile = self._config.profiles.get(profile_id)
         if profile is None:
             return None
-        capabilities = next(
+        availability = self._availability(profile_id, request)
+        if availability is None:
+            return None
+        output_limit = _candidate_output_limit(profile, request)
+        if not self._settings_compatible(
+            profile, availability, request, output_limit=output_limit
+        ):
+            return None
+        return profile
+
+    @staticmethod
+    def _availability(
+        profile_id: str, request: RoutingRequest
+    ) -> ProfileAvailability | None:
+        return next(
             (
-                available.capabilities
+                available
                 for available in request.available_profiles
                 if available.profile_id == profile_id
             ),
             None,
         )
-        if capabilities is None:
-            return None
+
+    @staticmethod
+    def _settings_compatible(
+        profile: ModelProfile,
+        availability: ProfileAvailability,
+        request: RoutingRequest,
+        *,
+        output_limit: int | None,
+    ) -> bool:
         required = request.required_capabilities
-        if not required <= capabilities:
-            return None
+        if not required <= availability.capabilities:
+            return False
         if not required <= set(profile.capabilities):
-            return None
-        return profile
+            return False
+
+        effort = profile.reasoning_effort
+        if effort is not None and availability.reasoning_efforts is not None:
+            if effort not in availability.reasoning_efforts:
+                return False
+
+        ceiling = _known_output_ceiling(profile, availability)
+        required_output = request.required_output_tokens
+        if output_limit is not None and ceiling is not None:
+            if output_limit > ceiling:
+                return False
+        if required_output is not None and output_limit is not None:
+            if output_limit < required_output:
+                return False
+        if required_output is not None and ceiling is not None:
+            if required_output > ceiling:
+                return False
+
+        context_limit = _known_context_limit(profile, availability)
+        if (
+            context_limit is not None
+            and request.current_input_tokens is not None
+            and output_limit is not None
+        ):
+            if request.current_input_tokens + output_limit > context_limit:
+                return False
+        return True
 
     @staticmethod
     def _history_compatible(
         request: RoutingRequest,
-        current: EffectiveConfiguration,
-        candidate_profile: ModelProfile,
+        current: EffectiveConfiguration | None,
+        target_profile: ModelProfile,
     ) -> bool:
-        return (
-            request.history_portable or candidate_profile.provider == current.provider
-        )
+        if current is None:
+            return True
+        return request.history_portable or target_profile.provider == current.provider
 
     def _switch_safe(
         self,
         request: RoutingRequest,
-        current: EffectiveConfiguration,
-        candidate_profile: ModelProfile,
+        current: EffectiveConfiguration | None,
+        target_profile: ModelProfile,
     ) -> bool:
         if not request.safe_to_apply_before_generation:
             return False
-        return self._history_compatible(request, current, candidate_profile)
+        return self._history_compatible(request, current, target_profile)
+
+    def _fallback_allowed(self, state: TaskState, fallback_id: str) -> bool:
+        return not (
+            fallback_id == self._config.router.economy and _state_incomplete(state)
+        )
 
     def _proposal(
         self,
@@ -411,7 +524,9 @@ class Router:
             request,
             RouteAction.SWITCH,
             reason,
-            target=_resolve(profile_id, profile),
+            target=_resolve(
+                profile_id, profile, _candidate_output_limit(profile, request)
+            ),
             matched_rule_id=matched_rule_id,
             result=result,
         )
@@ -441,8 +556,46 @@ class Router:
         )
 
 
-def _resolve(profile_id: str, profile: ModelProfile) -> EffectiveConfiguration:
-    output_limit = profile.output.default if profile.output is not None else None
+def _candidate_output_limit(
+    profile: ModelProfile, request: RoutingRequest
+) -> int | None:
+    default = profile.output.default if profile.output is not None else None
+    required = request.required_output_tokens
+    if required is None:
+        return default
+    if default is None:
+        return required
+    return max(default, required)
+
+
+def _known_output_ceiling(
+    profile: ModelProfile, availability: ProfileAvailability
+) -> int | None:
+    ceilings = [
+        value
+        for value in (
+            profile.output.max if profile.output is not None else None,
+            availability.max_output_tokens,
+        )
+        if value is not None
+    ]
+    return min(ceilings) if ceilings else None
+
+
+def _known_context_limit(
+    profile: ModelProfile, availability: ProfileAvailability
+) -> int | None:
+    limits = [
+        value
+        for value in (profile.context_limit, availability.context_limit)
+        if value is not None
+    ]
+    return min(limits) if limits else None
+
+
+def _resolve(
+    profile_id: str, profile: ModelProfile, output_limit: int | None
+) -> EffectiveConfiguration:
     return EffectiveConfiguration(
         profile_id=profile_id,
         provider=profile.provider,
