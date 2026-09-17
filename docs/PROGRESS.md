@@ -43,3 +43,63 @@ Implement a bounded portion of the harness-neutral core milestone from the
 roadmap: contracts, configuration, state extraction, policy, judges, router,
 and focused offline tests. The next agent should inspect the existing files and
 select a bounded slice rather than implementing the remaining product at once.
+
+## Milestone 1A: validated configuration
+
+### Scope
+
+Implement the validated TOML configuration and allowed model catalog required
+by the routing core. Policy evaluation, judge calls, and routing decisions are
+not implemented.
+
+### Created
+
+- `src/modelmux/config.py`: frozen Pydantic configuration models, the
+  `load_config` TOML loader, and `ConfigError` with sanitized messages.
+- `examples/router.toml`: commented example with clearly fictional provider
+  and model identifiers.
+- `tests/test_config.py`: 27 focused loading and validation tests.
+- A `Run tests` (`uv run pytest`) step in `.github/workflows/ci.yml`; the job
+  structure is unchanged.
+- A configuration section in `README.md` and a refreshed `tests/README.md`.
+
+### Configuration decisions
+
+- TOML keys: `version = 1`, `[router]`, `[judge]` with `[judge.static.scores]`
+  and `[judge.jev]`, `[profiles.<id>]` with optional `[profiles.<id>.output]`,
+  and ordered `[[policy.rules]]`.
+- `[router]` requires all four profile references (`default`,
+  `judgment_fallback`, `compatibility_fallback`, `economy`), and each must name
+  a configured profile. Requiring them explicitly keeps the router from
+  inferring a profile; when each reference is used arrives with the router.
+- Policy conditions use only the four semantic fields and `gt`/`gte`/`lt`/
+  `lte`; values are finite and in [0, 1]. Rule IDs are unique and conditions
+  are nonempty. First-match evaluation is not implemented yet.
+- `judge.selection` accepts `static`, `rules`, or `jev`; `deadline_ms`
+  defaults to 1500. Selecting `static` or `jev` requires the matching section.
+- `judge.jev.api_key_env` is an environment variable name constrained to
+  `[A-Za-z_][A-Za-z0-9_]*`. Loading never reads the environment; the Jev judge
+  resolves the credential when instantiated.
+- Provider/model IDs, reasoning effort (opaque provider value), capabilities,
+  rank, output default/max, and context limit are user configuration. There is
+  no built-in model catalog. Any configured `output.default` must not exceed
+  `output.max`.
+- `ConfigError` carries field-path messages derived from Pydantic error
+  locations and static messages. The underlying parser/validation exception is
+  suppressed (`from None`) so credential values and raw configuration
+  fragments cannot leak through tracebacks.
+- Validation is syntactic and internal only. It cannot verify provider account
+  access to a model, real context windows, or support for a reasoning setting.
+
+### Verification
+
+- `uv run pytest -q` passed: 27 tests.
+- `uv run ruff format --check src tests` passed.
+- `uv run ruff check src tests` passed.
+- `uv run mypy` passed (2 source files).
+- No network, live provider, coverage, or integration checks were run.
+
+### Next
+
+State extraction and offline judges: TaskState and TaskProfile contracts, the
+static and rule-based judges, and policy evaluation over the configured rules.

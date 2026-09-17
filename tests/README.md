@@ -1,4 +1,5 @@
 # Tests
 
-Milestone 0 reserves this directory for focused offline tests. No application
-behavior exists yet, so pytest currently reports no tests collected.
+Focused offline tests for the modelmux core. `tests/test_config.py` covers
+configuration loading and validation, including `examples/router.toml`. No
+API keys or network access are required.

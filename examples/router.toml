@@ -1,0 +1,94 @@
+# Example modelmux configuration.
+#
+# Every provider and model identifier below is fictional. Replace them with
+# providers and model IDs your account can actually use. Loading this file
+# validates syntax, types, ranges, and internal references only; it cannot
+# verify that a provider account has access to a model or that a reasoning
+# setting is supported.
+
+version = 1
+
+[router]
+default = "normal"
+judgment_fallback = "normal"
+compatibility_fallback = "hard"
+economy = "cheap"
+
+[judge]
+selection = "static"
+deadline_ms = 1500
+
+# The static judge returns these fixed scores. It exists so tests and local
+# runs work without credentials; the rules and Jev judges are not implemented.
+[judge.static.scores]
+reasoning_demand = 0.20
+routine = 0.90
+underspecified = 0.10
+high_consequence = 0.00
+
+[profiles.cheap]
+provider = "example-provider"
+model = "example-provider/cheap-placeholder-1"
+rank = 0
+reasoning_effort = "low"
+capabilities = ["text", "tools"]
+context_limit = 32000
+
+[profiles.cheap.output]
+default = 2048
+max = 4096
+
+[profiles.normal]
+provider = "example-provider"
+model = "example-provider/normal-placeholder-1"
+rank = 1
+capabilities = ["text", "tools"]
+context_limit = 128000
+
+[profiles.normal.output]
+default = 4096
+max = 8192
+
+[profiles.hard]
+provider = "example-provider"
+model = "example-provider/hard-placeholder-1"
+rank = 2
+reasoning_effort = "high"
+capabilities = ["text", "tools"]
+context_limit = 200000
+
+[profiles.hard.output]
+default = 8192
+max = 16384
+
+# First matching rule wins; the router default applies when none match.
+[[policy.rules]]
+id = "high-consequence-hard"
+route = "hard"
+conditions = [
+    { field = "high_consequence", op = "gte", value = 0.70 },
+]
+
+[[policy.rules]]
+id = "reasoning-demand-hard"
+route = "hard"
+conditions = [
+    { field = "reasoning_demand", op = "gte", value = 0.65 },
+]
+
+[[policy.rules]]
+id = "underspecified-normal"
+route = "normal"
+conditions = [
+    { field = "underspecified", op = "gte", value = 0.60 },
+]
+
+[[policy.rules]]
+id = "routine-cheap"
+route = "cheap"
+conditions = [
+    { field = "routine", op = "gte", value = 0.90 },
+    { field = "reasoning_demand", op = "lte", value = 0.20 },
+    { field = "underspecified", op = "lte", value = 0.20 },
+    { field = "high_consequence", op = "lte", value = 0.10 },
+]
