@@ -300,5 +300,73 @@ ceilings, and context limits. No Jev, service, CLI, or harness work.
   tokenizer, no live discovery, and no inference from the judge state.
 - Application-failure events, per-session sequencing, acknowledgments, TTL
   state, config digests, notifications, and usage/cost remain deferred.
-- Jev, the local service, CLI, and harness integration are still
-  unimplemented, so Milestone 1 is not complete.
+- The local service, CLI, and harness integration were still unimplemented
+  when this repair landed; Milestone 1D subsequently adds the Jev judge.
+
+## Milestone 1D: Jev task judge
+
+### Scope
+
+Adapt TypeSafe's System One API to the `TaskJudge` contract so the routing
+core can use Jev without policy changes and without TypeSafe types leaking
+into the core. No HTTP service, generator transport, or harness integration.
+
+### Contract verification
+
+Checked the official documentation on 2026-09-18 before implementing:
+quickstart, HTTP API reference, and confidence page (sources recorded in
+`docs/jev.md`). Verified `POST https://api.typesafe.ai/v1/systemone`, bearer
+authentication, the `state`/`model`/`questions` request shape, Noul
+`{type, instructions}`, Noul answers as `{type: "noul", noul: 0..1}` with no
+confidence property, the `model`/`answers`/`usage` response shape, and the
+documented 401/422/429/529 error statuses.
+
+### Created
+
+- `src/modelmux/judges/jev.py`: the adapter, Noul question definitions, state
+  translation, strict private response models, and safe error mapping.
+- `src/modelmux/types.py`: `JudgeUsage` and `JudgeResult.usage` (unknown stays
+  `None`).
+- `src/modelmux/judges/__init__.py`: `build_judge` accepts an optional
+  injected `httpx.AsyncClient` and builds `JevTaskJudge`; static and rules
+  build unchanged and never require a client.
+- `tests/test_jev.py`: 24 offline tests using `httpx.MockTransport`.
+- `docs/jev.md`: integration note with sources and verified contract.
+- README judge description updated.
+
+### Behavior decisions
+
+- One call per evaluation with the four agreed semantic questions keyed by
+  their semantic field names; observations are `probability` kind.
+- `TaskState` becomes a structured `state` object preserving source labels.
+  The judge never sees the model catalog, profile IDs, tier names, or router
+  metadata.
+- `judge.jev.api_key_env` is read only when the judge is constructed. Missing
+  credentials raise `JudgeError` at evaluation time, so static/rules use and
+  startup are unaffected and the Router applies its judgment fallback.
+- Malformed or incomplete answers, invalid JSON, transport errors, and HTTP
+  statuses raise `JudgeError` with static messages that omit keys, prompts,
+  bodies, and raw errors. Malformed values are never normalized into scores.
+- No retries and no inner deadline; the Router deadline cancels the in-flight
+  request in place. The injected client owns transport timeouts and lifecycle.
+- `usage.input_tokens`/`output_tokens` are carried when present; absent or
+  unknown fields stay `None`. The documented contract has no cost field.
+
+### Verification
+
+- `uv run pytest -q` passed: 137 tests (24 new Jev tests).
+- `uv run ruff format --check src tests` passed.
+- `uv run ruff check src tests` passed.
+- `uv run mypy` passed (11 source files).
+- Tests are offline with mocked transports. No live paid API calls were made,
+  so mock tests do not establish Jev accuracy, latency, or savings.
+
+### Remaining milestone work
+
+- No live Jev call has been made; real response schemas, rate limits, and
+  latency remain unverified against the service.
+- The Jev endpoint is fixed to the documented URL and is not configurable.
+- Application-failure events, per-session sequencing, acknowledgments, TTL
+  state, config digests, notifications, and cost reporting remain deferred.
+- The local service, CLI, and harness integration are still unimplemented, so
+  Milestone 1 is not complete.

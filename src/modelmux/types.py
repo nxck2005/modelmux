@@ -83,6 +83,15 @@ class TaskState(BaseModel):
     tool_names: tuple[Identifier, ...]
 
 
+class JudgeUsage(BaseModel):
+    """Token usage reported by a judge. Unknown values are None."""
+
+    model_config = _STRICT
+
+    input_tokens: NonNegativeInt | None = None
+    output_tokens: NonNegativeInt | None = None
+
+
 class JudgeResult(BaseModel):
     """One judge observation of a task profile.
 
@@ -97,3 +106,4 @@ class JudgeResult(BaseModel):
     judge_id: Identifier
     question_version: Identifier = QUESTION_VERSION
     model_id: Identifier | None = None
+    usage: JudgeUsage | None = None

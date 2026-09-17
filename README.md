@@ -5,16 +5,16 @@ Focus on the work, not the model switcher.
 modelmux is intended to select an explicitly configured model and reasoning
 setting for each task. The harness-independent core will own model selection,
 policy, and judge logic; separate harness integrations will provide facts and
-apply the core's decisions. Jev is planned as an optional implementation
-behind a replaceable judge interface.
+apply the core's decisions. Jev is an optional implementation behind a
+replaceable judge interface.
 
-Validated configuration loading, bounded task-state extraction, offline
-judges, policy evaluation, and routing decisions are implemented. Model
-profiles, router references, ordered policy rules, and judge selection are
-read from TOML; supplied message content is turned into a bounded `TaskState`,
-evaluated by a static or rule-based judge, and resolved into a routing
-decision. The local service, Jev, and harness integrations are not implemented
-yet.
+Validated configuration loading, bounded task-state extraction, static,
+rules, and Jev judges, policy evaluation, and routing decisions are
+implemented. Model profiles, router references, ordered policy rules, and
+judge selection are read from TOML; supplied message content is turned into a
+bounded `TaskState`, evaluated by the configured judge, and resolved into a
+routing decision. The local service and harness integrations are not
+implemented yet.
 
 ## Configuration
 
@@ -65,10 +65,14 @@ the judge is created, not while loading configuration.
 
 Extraction is deterministic and harness-neutral. The caller supplies message,
 instruction, and tool text; the result is a bounded `TaskState` that records
-truncation and omission counts. `StaticTaskJudge` returns configured scores and
-`RuleBasedTaskJudge` is a small conservative cue baseline. Both report
-heuristic observations, never see the model catalog, and never recommend a
-model.
+truncation and omission counts. `StaticTaskJudge` returns configured scores,
+`RuleBasedTaskJudge` is a small conservative cue baseline, and `JevTaskJudge`
+asks TypeSafe's System One API the four semantic questions in one request and
+reports probability observations. No judge sees the model catalog, profile
+IDs, or tier names, and none recommends a model. The Jev adapter and its
+verified contract are documented in [docs/jev.md](docs/jev.md); it needs an
+injected `httpx.AsyncClient` and the configured credential environment
+variable, and falls back through the Router when unavailable.
 
 `Router` evaluates one `TaskState` with an injected judge and returns a
 `RouteDecision` with action `keep`, `switch`, `defer`, or `stop`. Decisions are
