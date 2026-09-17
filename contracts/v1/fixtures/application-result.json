@@ -1,0 +1,15 @@
+{
+  "decision_id": "decision-0001",
+  "session_id": "session-abc",
+  "user_turn_id": "turn-1",
+  "session_revision": 4,
+  "status": "applied",
+  "applied": {
+    "profile_id": "cheap",
+    "provider": "example-provider",
+    "model": "example-provider/cheap-placeholder-1",
+    "reasoning_effort": "low",
+    "output_limit": 2048
+  },
+  "failure_code": null
+}

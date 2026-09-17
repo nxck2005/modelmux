@@ -33,6 +33,7 @@ async def test_static_judge_returns_configured_profile() -> None:
     assert result.question_version == QUESTION_VERSION
     assert result.observation_kind is ObservationKind.HEURISTIC
     assert result.model_id is None
+    assert result.usage is None
 
 
 async def test_rules_judge_defaults_toward_normal() -> None:
@@ -86,3 +87,4 @@ async def test_rules_judge_identity_is_heuristic() -> None:
     assert result.question_version == QUESTION_VERSION
     assert result.observation_kind is ObservationKind.HEURISTIC
     assert result.model_id is None
+    assert result.usage is None

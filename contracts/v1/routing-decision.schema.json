@@ -1,0 +1,237 @@
+{
+  "$defs": {
+    "EffectiveConfiguration": {
+      "additionalProperties": false,
+      "description": "A fully resolved profile/provider/model/effort/output selection.",
+      "properties": {
+        "profile_id": {
+          "minLength": 1,
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Effort"
+        },
+        "output_limit": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Limit"
+        }
+      },
+      "required": [
+        "profile_id",
+        "provider",
+        "model"
+      ],
+      "title": "EffectiveConfiguration",
+      "type": "object"
+    },
+    "ObservationKind": {
+      "description": "Whether scores are model probabilities or a heuristic.",
+      "enum": [
+        "probability",
+        "heuristic"
+      ],
+      "title": "ObservationKind",
+      "type": "string"
+    },
+    "ReasonCode": {
+      "description": "Why a decision was made.",
+      "enum": [
+        "rule_match",
+        "default_profile",
+        "economy_vetoed",
+        "retained_current",
+        "escalated",
+        "compatibility_fallback",
+        "judgment_fallback",
+        "judge_timeout",
+        "judge_unavailable",
+        "application_failed",
+        "tool_continuation",
+        "unsafe_boundary",
+        "incompatible_history",
+        "candidate_unavailable",
+        "no_compatible_profile",
+        "invalid_current",
+        "incomplete_state"
+      ],
+      "title": "ReasonCode",
+      "type": "string"
+    },
+    "RouteAction": {
+      "description": "The proposed routing action.\n\n``keep`` and ``defer`` leave the current configuration in effect; ``switch``\nreplaces it; ``stop`` means no valid configuration can execute.",
+      "enum": [
+        "keep",
+        "switch",
+        "defer",
+        "stop"
+      ],
+      "title": "RouteAction",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A proposed routing action for the caller to apply.\n\nA decision never claims that a switch happened; only an ApplicationResult\nwith status ``applied`` acknowledges the actual effective configuration.",
+  "properties": {
+    "decision_id": {
+      "minLength": 1,
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "request_id": {
+      "minLength": 1,
+      "title": "Request Id",
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "user_turn_id": {
+      "minLength": 1,
+      "title": "User Turn Id",
+      "type": "string"
+    },
+    "session_revision": {
+      "minimum": 0,
+      "title": "Session Revision",
+      "type": "integer"
+    },
+    "action": {
+      "$ref": "#/$defs/RouteAction"
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EffectiveConfiguration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "apply_at": {
+      "const": "before_next_generation",
+      "default": "before_next_generation",
+      "title": "Apply At",
+      "type": "string"
+    },
+    "reason_code": {
+      "$ref": "#/$defs/ReasonCode"
+    },
+    "matched_rule_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Matched Rule Id"
+    },
+    "config_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Config Digest"
+    },
+    "judge_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Judge Id"
+    },
+    "observation_kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ObservationKind"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "question_version": {
+      "default": "task-profile-v1",
+      "minLength": 1,
+      "title": "Question Version",
+      "type": "string"
+    },
+    "notify_on_applied": {
+      "default": false,
+      "title": "Notify On Applied",
+      "type": "boolean"
+    },
+    "elapsed_ms": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Elapsed Ms"
+    }
+  },
+  "required": [
+    "decision_id",
+    "request_id",
+    "session_id",
+    "user_turn_id",
+    "session_revision",
+    "action",
+    "reason_code"
+  ],
+  "title": "RouteDecision",
+  "type": "object"
+}

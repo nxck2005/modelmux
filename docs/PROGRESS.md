@@ -368,5 +368,89 @@ documented 401/422/429/529 error statuses.
 - The Jev endpoint is fixed to the documented URL and is not configurable.
 - Application-failure events, per-session sequencing, acknowledgments, TTL
   state, config digests, notifications, and cost reporting remain deferred.
-- The local service, CLI, and harness integration are still unimplemented, so
-  Milestone 1 is not complete.
+- The local control service, CLI, and harness integration remain later
+  milestones.
+
+## Milestone 1E: versioned boundary and Milestone 1 completion
+
+### Scope
+
+Finalize the versioned core boundary (RoutingRequest v1, RouteDecision v1,
+ApplicationResult v1), generate JSON schemas from the authoritative models,
+add a drift check and representative fixtures, and verify Milestone 1 as a
+coherent offline library.
+
+### Created
+
+- `src/modelmux/router.py`: request correlation fields
+  (`integration_instance_id`, `last_applied_decision_id`,
+  `application_failure_code`), the `application_failed` event and its
+  handling, decision fields (`apply_at`, `config_digest`,
+  `notify_on_applied`, `elapsed_ms`), and `ApplicationStatus` /
+  `ApplicationResult` with cross-field invariants.
+- `src/modelmux/schemas.py` and `scripts/generate_contract_schemas.py`: the
+  reproducible schema-generation mechanism.
+- `contracts/v1/routing-request.schema.json`,
+  `contracts/v1/routing-decision.schema.json`, and
+  `contracts/v1/application-result.schema.json`.
+- `contracts/v1/fixtures/`: representative serialized request, decision, and
+  application result.
+- `tests/test_contracts.py`: schema drift, fixture round-trip, and
+  application-result invariants.
+- `tests/test_router.py`: application-failure routing and one serialized
+  end-to-end offline flow.
+
+### Decisions
+
+- `ApplicationResult` is separate from `RouteDecision`: only
+  `status="applied"` acknowledges the actual effective configuration, and
+  applied results must carry it. `failure_code` is valid only for `rejected`;
+  stale and cancelled results never claim a switch.
+- The config digest covers the resolved effective configuration
+  (profile/provider/model/effort/output) only. It contains no credentials,
+  prompts, or provider URLs.
+- `application_failed` requests never call the judge. A valid current route is
+  retained; otherwise one compatibility fallback is attempted with the same
+  safety, history, and economy checks, and the router stops when nothing is
+  usable. The factual failure code is accepted only on that event.
+- `elapsed_ms` measures routing time, including the judge call.
+- Schemas are generated from the Pydantic models; the committed copies are
+  compared in tests, so a model change without regeneration fails the suite.
+
+### Verification
+
+- `uv run pytest -q` passed: 152 tests.
+- `uv run ruff format --check src tests`, `uv run ruff check src tests`, and
+  `uv run mypy` passed (12 source files).
+- One coherent offline flow exercises a JSON-serialized request, first-turn
+  selection, harder follow-up escalation, tool continuation retaining the
+  actual route, and predictable judge-failure retention.
+- `uv run python scripts/generate_contract_schemas.py` regenerates the
+  committed schemas; the drift test passes.
+- All checks are offline. No live Jev calls, HTTP service, benchmark, or
+  harness end-to-end run were performed.
+
+### Milestone 1 status
+
+Core sessions complete: 1A configuration, 1B state extraction and offline
+judges, 1C routing core, the 1C review repairs and context fix, 1D Jev
+adapter, and 1E boundary and schemas. The core exports no harness-specific
+types, and errors and decision metadata carry no prompts, credentials, or
+provider URLs. Unknown usage stays `None`; no cost is reported because the
+documented provider contract has no cost field.
+
+Remaining gaps (not blockers to the core library, but not done):
+
+- Real Jev behavior is mock-tested only; no live call has been made.
+- Cache facts are not modeled; only measured `current_input_tokens` and the
+  Jev usage token counts are carried. Cost stays unreported.
+- Application sequencing, acknowledgment enforcement, TTL state, and
+  stale-message handling belong to the service/integration milestones.
+- The generator transport, local control service, CLI, and OpenCode
+  integration do not exist yet.
+
+### Next
+
+The local control service and CLI from the implementation plan
+(`modelmux validate --config ...`, `modelmux serve --config ...`, loopback
+endpoints). OpenCode integration remains later work.

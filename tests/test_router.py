@@ -17,6 +17,7 @@ from modelmux.router import (
     ProfileAvailability,
     ReasonCode,
     RouteAction,
+    RouteDecision,
     Router,
     RoutingRequest,
 )
@@ -205,9 +206,11 @@ def _request(
     current_input_tokens: int | None = None,
     safe: bool = True,
     history_portable: bool = True,
+    application_failure_code: str | None = None,
 ) -> RoutingRequest:
     return RoutingRequest(
         request_id="req-1",
+        integration_instance_id="integration-1",
         session_id="sess-1",
         user_turn_id="turn-1",
         session_revision=2,
@@ -224,6 +227,7 @@ def _request(
         current_input_tokens=current_input_tokens,
         safe_to_apply_before_generation=safe,
         history_portable=history_portable,
+        application_failure_code=application_failure_code,
     )
 
 
@@ -482,6 +486,7 @@ def test_request_requires_task_state_for_new_user_turn() -> None:
     with pytest.raises(ValidationError):
         RoutingRequest(
             request_id="r",
+            integration_instance_id="i",
             session_id="s",
             user_turn_id="t",
             session_revision=1,
@@ -493,6 +498,7 @@ def test_request_requires_current_for_tool_continuation() -> None:
     with pytest.raises(ValidationError):
         RoutingRequest(
             request_id="r",
+            integration_instance_id="i",
             session_id="s",
             user_turn_id="t",
             session_revision=1,
@@ -504,6 +510,7 @@ def test_request_rejects_duplicate_availability() -> None:
     with pytest.raises(ValidationError):
         RoutingRequest(
             request_id="r",
+            integration_instance_id="i",
             session_id="s",
             user_turn_id="t",
             session_revision=1,
@@ -521,6 +528,7 @@ async def test_end_to_end_offline_scenario() -> None:
     router = Router(config, build_judge(config.judge))
     request = RoutingRequest(
         request_id="req-e2e",
+        integration_instance_id="integration-e2e",
         session_id="sess-e2e",
         user_turn_id="turn-e2e",
         session_revision=1,
@@ -982,3 +990,119 @@ async def test_first_turn_output_at_context_boundary_is_accepted() -> None:
 
     assert decision.action is RouteAction.SWITCH
     assert decision.reason_code is ReasonCode.DEFAULT_PROFILE
+
+
+async def test_application_failure_retains_valid_current() -> None:
+    judge = _FakeJudge(_profile_values(high_consequence=0.9))
+    current = _current("hard", model="model-hard")
+    request = _request(
+        current=current,
+        event_kind=EventKind.APPLICATION_FAILED,
+        application_failure_code="provider_rejected",
+    )
+
+    decision = await Router(_config(), judge).route(request)
+
+    assert decision.action is RouteAction.KEEP
+    assert decision.reason_code is ReasonCode.APPLICATION_FAILED
+    assert decision.target == current
+    assert decision.notify_on_applied is False
+    assert judge.calls == 0
+
+
+async def test_application_failure_falls_back_when_current_is_unusable() -> None:
+    judge = _FakeJudge(_profile_values())
+    request = _request(
+        current=_current("normal"),
+        event_kind=EventKind.APPLICATION_FAILED,
+        available=_availability("cheap", "hard"),
+    )
+
+    decision = await Router(_config(), judge).route(request)
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.COMPATIBILITY_FALLBACK
+    assert decision.target is not None
+    assert decision.target.profile_id == "hard"
+    assert judge.calls == 0
+
+
+async def test_application_failure_without_state_vetoes_economy_fallback() -> None:
+    judge = _FakeJudge(_profile_values())
+    request = RoutingRequest(
+        request_id="req-1",
+        integration_instance_id="integration-1",
+        session_id="sess-1",
+        user_turn_id="turn-1",
+        session_revision=2,
+        event_kind=EventKind.APPLICATION_FAILED,
+        current=_current("normal"),
+        available_profiles=_availability("cheap"),
+    )
+
+    decision = await Router(_config(compatibility_fallback="cheap"), judge).route(
+        request
+    )
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.NO_COMPATIBLE_PROFILE
+
+
+async def test_serialized_offline_library_flow() -> None:
+    judge = _FakeJudge(_profile_values())
+    router = Router(_config(), judge)
+
+    first_request = _request()
+    first = await router.route(
+        RoutingRequest.model_validate_json(first_request.model_dump_json())
+    )
+
+    assert first.action is RouteAction.SWITCH
+    assert first.reason_code is ReasonCode.DEFAULT_PROFILE
+    assert first.target is not None
+    assert first.target.profile_id == "normal"
+    assert first.apply_at == "before_next_generation"
+    assert first.config_digest is not None
+    assert first.notify_on_applied is True
+    assert first.elapsed_ms is not None
+    assert "do the thing" not in first.model_dump_json()
+    assert RouteDecision.model_validate_json(first.model_dump_json()) == first
+
+    judge.profile = _profile_values(high_consequence=0.9)
+    second = await router.route(
+        RoutingRequest.model_validate_json(
+            _request(current=first.target).model_dump_json()
+        )
+    )
+
+    assert second.action is RouteAction.SWITCH
+    assert second.reason_code is ReasonCode.ESCALATED
+    assert second.target is not None
+    assert second.target.profile_id == "hard"
+    assert second.config_digest != first.config_digest
+
+    calls = judge.calls
+    third = await router.route(
+        RoutingRequest.model_validate_json(
+            _request(
+                current=second.target, event_kind=EventKind.TOOL_CONTINUATION
+            ).model_dump_json()
+        )
+    )
+
+    assert third.action is RouteAction.KEEP
+    assert third.reason_code is ReasonCode.TOOL_CONTINUATION
+    assert third.target == second.target
+    assert third.config_digest == second.config_digest
+    assert judge.calls == calls
+
+    judge.error = JudgeError("unavailable")
+    fourth = await router.route(
+        RoutingRequest.model_validate_json(
+            _request(current=third.target).model_dump_json()
+        )
+    )
+
+    assert fourth.action is RouteAction.KEEP
+    assert fourth.reason_code is ReasonCode.JUDGE_UNAVAILABLE
+    assert fourth.target == second.target

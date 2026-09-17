@@ -1,0 +1,403 @@
+{
+  "$defs": {
+    "BoundedText": {
+      "additionalProperties": false,
+      "description": "Text retained for judging, with its source and truncation facts.",
+      "properties": {
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "truncated": {
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "omitted_chars": {
+          "minimum": 0,
+          "title": "Omitted Chars",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source",
+        "text",
+        "truncated",
+        "omitted_chars"
+      ],
+      "title": "BoundedText",
+      "type": "object"
+    },
+    "EffectiveConfiguration": {
+      "additionalProperties": false,
+      "description": "A fully resolved profile/provider/model/effort/output selection.",
+      "properties": {
+        "profile_id": {
+          "minLength": 1,
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Effort"
+        },
+        "output_limit": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Limit"
+        }
+      },
+      "required": [
+        "profile_id",
+        "provider",
+        "model"
+      ],
+      "title": "EffectiveConfiguration",
+      "type": "object"
+    },
+    "EventKind": {
+      "description": "The caller event that triggered routing.",
+      "enum": [
+        "new_user_turn",
+        "tool_continuation",
+        "application_failed"
+      ],
+      "title": "EventKind",
+      "type": "string"
+    },
+    "ProfileAvailability": {
+      "additionalProperties": false,
+      "description": "Caller-reported availability and factual control support for a profile.\n\n``reasoning_efforts``, ``max_output_tokens``, and ``context_limit`` are\nNone when the caller does not know the fact.",
+      "properties": {
+        "profile_id": {
+          "minLength": 1,
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "capabilities": {
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Capabilities",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "reasoning_efforts": {
+          "anyOf": [
+            {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Efforts"
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Output Tokens"
+        },
+        "context_limit": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Limit"
+        }
+      },
+      "required": [
+        "profile_id"
+      ],
+      "title": "ProfileAvailability",
+      "type": "object"
+    },
+    "TaskState": {
+      "additionalProperties": false,
+      "description": "Bounded, harness-neutral task content supplied to a judge.\n\nCounts and byte sizes describe only the records supplied to extraction.\nThey are exact for that provided window and say nothing about the full\nsession or the provider generation request.",
+      "properties": {
+        "latest_user": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "instructions": {
+          "items": {
+            "$ref": "#/$defs/BoundedText"
+          },
+          "title": "Instructions",
+          "type": "array"
+        },
+        "history": {
+          "items": {
+            "$ref": "#/$defs/BoundedText"
+          },
+          "title": "History",
+          "type": "array"
+        },
+        "tool_excerpts": {
+          "items": {
+            "$ref": "#/$defs/BoundedText"
+          },
+          "title": "Tool Excerpts",
+          "type": "array"
+        },
+        "instructions_omitted": {
+          "minimum": 0,
+          "title": "Instructions Omitted",
+          "type": "integer"
+        },
+        "history_omitted": {
+          "minimum": 0,
+          "title": "History Omitted",
+          "type": "integer"
+        },
+        "tools_omitted": {
+          "minimum": 0,
+          "title": "Tools Omitted",
+          "type": "integer"
+        },
+        "message_count": {
+          "minimum": 0,
+          "title": "Message Count",
+          "type": "integer"
+        },
+        "input_bytes": {
+          "minimum": 0,
+          "title": "Input Bytes",
+          "type": "integer"
+        },
+        "tool_count": {
+          "minimum": 0,
+          "title": "Tool Count",
+          "type": "integer"
+        },
+        "tool_names": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Tool Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "latest_user",
+        "instructions",
+        "history",
+        "tool_excerpts",
+        "instructions_omitted",
+        "history_omitted",
+        "tools_omitted",
+        "message_count",
+        "input_bytes",
+        "tool_count",
+        "tool_names"
+      ],
+      "title": "TaskState",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A harness-neutral routing request.\n\nCorrelation fields are echoed into the decision. A decision is a proposal\nonly; the caller owns the actually applied configuration. ``None`` token\nor support facts are unknown, not zero.",
+  "properties": {
+    "request_id": {
+      "minLength": 1,
+      "title": "Request Id",
+      "type": "string"
+    },
+    "integration_instance_id": {
+      "minLength": 1,
+      "title": "Integration Instance Id",
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "user_turn_id": {
+      "minLength": 1,
+      "title": "User Turn Id",
+      "type": "string"
+    },
+    "session_revision": {
+      "minimum": 0,
+      "title": "Session Revision",
+      "type": "integer"
+    },
+    "event_kind": {
+      "$ref": "#/$defs/EventKind"
+    },
+    "task_state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TaskState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "current": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EffectiveConfiguration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "last_applied_decision_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Applied Decision Id"
+    },
+    "available_profiles": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ProfileAvailability"
+      },
+      "title": "Available Profiles",
+      "type": "array"
+    },
+    "required_capabilities": {
+      "default": [],
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Required Capabilities",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "required_output_tokens": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Required Output Tokens"
+    },
+    "current_input_tokens": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current Input Tokens"
+    },
+    "safe_to_apply_before_generation": {
+      "default": true,
+      "title": "Safe To Apply Before Generation",
+      "type": "boolean"
+    },
+    "history_portable": {
+      "default": true,
+      "title": "History Portable",
+      "type": "boolean"
+    },
+    "application_failure_code": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Application Failure Code"
+    }
+  },
+  "required": [
+    "request_id",
+    "integration_instance_id",
+    "session_id",
+    "user_turn_id",
+    "session_revision",
+    "event_kind"
+  ],
+  "title": "RoutingRequest",
+  "type": "object"
+}

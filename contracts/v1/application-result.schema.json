@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "ApplicationStatus": {
+      "description": "How the caller's attempt to apply a decision ended.",
+      "enum": [
+        "applied",
+        "rejected",
+        "stale",
+        "cancelled"
+      ],
+      "title": "ApplicationStatus",
+      "type": "string"
+    },
+    "EffectiveConfiguration": {
+      "additionalProperties": false,
+      "description": "A fully resolved profile/provider/model/effort/output selection.",
+      "properties": {
+        "profile_id": {
+          "minLength": 1,
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Effort"
+        },
+        "output_limit": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Limit"
+        }
+      },
+      "required": [
+        "profile_id",
+        "provider",
+        "model"
+      ],
+      "title": "EffectiveConfiguration",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The caller's report of what actually happened after a decision.\n\nOnly ``applied`` acknowledges that the harness uses the reported effective\nconfiguration. The other statuses mean no switch is confirmed; the caller\ncarries its actual state into the next request.",
+  "properties": {
+    "decision_id": {
+      "minLength": 1,
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "user_turn_id": {
+      "minLength": 1,
+      "title": "User Turn Id",
+      "type": "string"
+    },
+    "session_revision": {
+      "minimum": 0,
+      "title": "Session Revision",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/ApplicationStatus"
+    },
+    "applied": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EffectiveConfiguration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
+    }
+  },
+  "required": [
+    "decision_id",
+    "session_id",
+    "user_turn_id",
+    "session_revision",
+    "status"
+  ],
+  "title": "ApplicationResult",
+  "type": "object"
+}

@@ -76,16 +76,35 @@ variable, and falls back through the Router when unavailable.
 
 `Router` evaluates one `TaskState` with an injected judge and returns a
 `RouteDecision` with action `keep`, `switch`, `defer`, or `stop`. Decisions are
-proposals: the caller applies the resolved target and owns the result. A
-profile is eligible only when it is configured and the caller reports it
-available with the required capabilities and any known effort, output-ceiling,
-and context facts; unknown facts are not treated as verified. Before retaining
-a current configuration the router validates its provider, model, effort, and
-effective output limit against the configured profile and reported facts.
-Ineligible candidates use one checked compatibility fallback, which may not
-downgrade or replace a valid current route; a judge failure retains the
-current route or uses the judgment fallback; tool continuations bypass the
-judge.
+proposals: the caller applies the resolved target and owns the result. The
+caller then reports an `ApplicationResult`, and only `status="applied"`
+acknowledges that the harness uses the reported configuration. A profile is
+eligible only when it is configured and the caller reports it available with
+the required capabilities and any known effort, output-ceiling, and context
+facts; unknown facts are not treated as verified. Before retaining a current
+configuration the router validates its provider, model, effort, and effective
+output limit against the configured profile and reported facts. Ineligible
+candidates use one checked compatibility fallback, which may not downgrade or
+replace a valid current route; a judge failure retains the current route or
+uses the judgment fallback; tool continuations bypass the judge.
+
+## Versioned contracts
+
+The boundary types are `RoutingRequest`, `RouteDecision`, and
+`ApplicationResult`. JSON schemas are generated from those Pydantic models
+into `contracts/v1/` and are checked against them by the test suite:
+
+```sh
+uv run python scripts/generate_contract_schemas.py
+uv run pytest
+```
+
+Representative serialized examples live in `contracts/v1/fixtures/`. Decisions
+carry correlation IDs, the action and reason, a credentials-free digest of the
+effective configuration, and a `notify_on_applied` flag; they never contain
+prompt text or secrets. Application results carry the decision identity, a
+status of `applied`, `rejected`, `stale`, or `cancelled`, and the actual
+effective configuration when known.
 
 ```python
 from modelmux.config import load_config

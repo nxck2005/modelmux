@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import time
 from enum import StrEnum
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -28,6 +32,7 @@ class EventKind(StrEnum):
 
     NEW_USER_TURN = "new_user_turn"
     TOOL_CONTINUATION = "tool_continuation"
+    APPLICATION_FAILED = "application_failed"
 
 
 class RouteAction(StrEnum):
@@ -55,6 +60,7 @@ class ReasonCode(StrEnum):
     JUDGMENT_FALLBACK = "judgment_fallback"
     JUDGE_TIMEOUT = "judge_timeout"
     JUDGE_UNAVAILABLE = "judge_unavailable"
+    APPLICATION_FAILED = "application_failed"
     TOOL_CONTINUATION = "tool_continuation"
     UNSAFE_BOUNDARY = "unsafe_boundary"
     INCOMPATIBLE_HISTORY = "incompatible_history"
@@ -103,18 +109,21 @@ class RoutingRequest(BaseModel):
     model_config = _STRICT
 
     request_id: Identifier
+    integration_instance_id: Identifier
     session_id: Identifier
     user_turn_id: Identifier
     session_revision: NonNegativeInt
     event_kind: EventKind
     task_state: TaskState | None = None
     current: EffectiveConfiguration | None = None
+    last_applied_decision_id: Identifier | None = None
     available_profiles: tuple[ProfileAvailability, ...] = ()
     required_capabilities: frozenset[Identifier] = frozenset()
     required_output_tokens: PositiveInt | None = None
     current_input_tokens: NonNegativeInt | None = None
     safe_to_apply_before_generation: bool = True
     history_portable: bool = True
+    application_failure_code: Identifier | None = None
 
     @model_validator(mode="after")
     def _event_requirements(self) -> RoutingRequest:
@@ -122,6 +131,13 @@ class RoutingRequest(BaseModel):
             raise ValueError("new_user_turn requires task_state")
         if self.event_kind is EventKind.TOOL_CONTINUATION and self.current is None:
             raise ValueError("tool_continuation requires a current configuration")
+        if (
+            self.application_failure_code is not None
+            and self.event_kind is not EventKind.APPLICATION_FAILED
+        ):
+            raise ValueError(
+                "application_failure_code requires an application_failed event"
+            )
         seen: set[str] = set()
         for available in self.available_profiles:
             if available.profile_id in seen:
@@ -133,7 +149,11 @@ class RoutingRequest(BaseModel):
 
 
 class RouteDecision(BaseModel):
-    """A proposed routing action for the caller to apply."""
+    """A proposed routing action for the caller to apply.
+
+    A decision never claims that a switch happened; only an ApplicationResult
+    with status ``applied`` acknowledges the actual effective configuration.
+    """
 
     model_config = _STRICT
 
@@ -144,16 +164,61 @@ class RouteDecision(BaseModel):
     session_revision: NonNegativeInt
     action: RouteAction
     target: EffectiveConfiguration | None = None
+    apply_at: Literal["before_next_generation"] = "before_next_generation"
     reason_code: ReasonCode
     matched_rule_id: Identifier | None = None
+    config_digest: str | None = None
     judge_id: Identifier | None = None
     observation_kind: ObservationKind | None = None
     question_version: Identifier = QUESTION_VERSION
+    notify_on_applied: bool = False
+    elapsed_ms: float | None = None
 
     @property
     def continues_with_current(self) -> bool:
         """Whether the caller may keep generating with the current route."""
         return self.action in (RouteAction.KEEP, RouteAction.DEFER)
+
+
+class ApplicationStatus(StrEnum):
+    """How the caller's attempt to apply a decision ended."""
+
+    APPLIED = "applied"
+    REJECTED = "rejected"
+    STALE = "stale"
+    CANCELLED = "cancelled"
+
+
+class ApplicationResult(BaseModel):
+    """The caller's report of what actually happened after a decision.
+
+    Only ``applied`` acknowledges that the harness uses the reported effective
+    configuration. The other statuses mean no switch is confirmed; the caller
+    carries its actual state into the next request.
+    """
+
+    model_config = _STRICT
+
+    decision_id: Identifier
+    session_id: Identifier
+    user_turn_id: Identifier
+    session_revision: NonNegativeInt
+    status: ApplicationStatus
+    applied: EffectiveConfiguration | None = None
+    failure_code: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _status_requirements(self) -> ApplicationResult:
+        if self.status is ApplicationStatus.APPLIED and self.applied is None:
+            raise ValueError(
+                "applied status requires the actual effective configuration"
+            )
+        if (
+            self.failure_code is not None
+            and self.status is not ApplicationStatus.REJECTED
+        ):
+            raise ValueError("failure_code is only valid for rejected results")
+        return self
 
 
 class Router:
@@ -164,8 +229,17 @@ class Router:
         self._judge = judge
 
     async def route(self, request: RoutingRequest) -> RouteDecision:
+        started = time.perf_counter()
+        decision = await self._route(request)
+        return decision.model_copy(
+            update={"elapsed_ms": (time.perf_counter() - started) * 1000}
+        )
+
+    async def _route(self, request: RoutingRequest) -> RouteDecision:
         if request.event_kind is EventKind.TOOL_CONTINUATION:
             return self._continuation_decision(request)
+        if request.event_kind is EventKind.APPLICATION_FAILED:
+            return self._application_failure_decision(request)
 
         state = request.task_state
         assert state is not None
@@ -329,8 +403,8 @@ class Router:
     def _recovery_decision(
         self,
         request: RoutingRequest,
-        state: TaskState,
-        result: JudgeResult,
+        state: TaskState | None,
+        result: JudgeResult | None,
     ) -> RouteDecision:
         fallback_id = self._config.router.compatibility_fallback
         fallback_profile = self._config.profiles.get(fallback_id)
@@ -368,6 +442,14 @@ class Router:
             ReasonCode.TOOL_CONTINUATION,
             target=current,
         )
+
+    def _application_failure_decision(self, request: RoutingRequest) -> RouteDecision:
+        current = request.current
+        if current is not None and self._current_valid(request):
+            return self._decision(
+                request, RouteAction.KEEP, ReasonCode.APPLICATION_FAILED, target=current
+            )
+        return self._recovery_decision(request, request.task_state, None)
 
     def _judge_failure_decision(
         self, request: RoutingRequest, state: TaskState, reason: ReasonCode
@@ -506,10 +588,10 @@ class Router:
             return False
         return self._history_compatible(request, current, target_profile)
 
-    def _fallback_allowed(self, state: TaskState, fallback_id: str) -> bool:
-        return not (
-            fallback_id == self._config.router.economy and _state_incomplete(state)
-        )
+    def _fallback_allowed(self, state: TaskState | None, fallback_id: str) -> bool:
+        if fallback_id != self._config.router.economy:
+            return True
+        return state is not None and not _state_incomplete(state)
 
     def _proposal(
         self,
@@ -541,6 +623,9 @@ class Router:
         matched_rule_id: str | None = None,
         result: JudgeResult | None = None,
     ) -> RouteDecision:
+        effective = target
+        if effective is None and action in (RouteAction.KEEP, RouteAction.DEFER):
+            effective = request.current
         return RouteDecision(
             decision_id=uuid4().hex,
             request_id=request.request_id,
@@ -551,8 +636,10 @@ class Router:
             target=target,
             reason_code=reason,
             matched_rule_id=matched_rule_id,
+            config_digest=_config_digest(effective) if effective is not None else None,
             judge_id=result.judge_id if result is not None else None,
             observation_kind=result.observation_kind if result is not None else None,
+            notify_on_applied=action is RouteAction.SWITCH,
         )
 
 
@@ -591,6 +678,13 @@ def _known_context_limit(
         if value is not None
     ]
     return min(limits) if limits else None
+
+
+def _config_digest(configuration: EffectiveConfiguration) -> str:
+    canonical = json.dumps(
+        configuration.model_dump(), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _resolve(
