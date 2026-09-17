@@ -145,3 +145,8 @@ For example, a pointer such as:
 (This is just an example, there might not be a doc like that in this repo.)
 
 Provide only the context needed to direct the agent to the relevant source of truth. Do not require the agent to read every project document before every task.
+
+- The project uses Python >=3.11, uv, and a `src/modelmux/` package layout.
+- Keep harness integrations under `integrations/`; routing policy and judge logic belong in the core.
+- The roadmap is `docs/IMPLEMENTATION_PLAN.md`; current handoff notes are in `docs/PROGRESS.md`.
+- Useful checks are `uv run ruff format --check src tests`, `uv run ruff check src tests`, and `uv run mypy`.
