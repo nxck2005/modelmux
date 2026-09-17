@@ -477,12 +477,12 @@ class Router:
                 return False
 
         context_limit = _known_context_limit(profile, availability)
-        if (
-            context_limit is not None
-            and request.current_input_tokens is not None
-            and output_limit is not None
-        ):
-            if request.current_input_tokens + output_limit > context_limit:
+        input_tokens = request.current_input_tokens
+        if context_limit is not None and input_tokens is not None:
+            if input_tokens > context_limit:
+                return False
+            reservation = output_limit if output_limit is not None else required_output
+            if reservation is not None and input_tokens + reservation > context_limit:
                 return False
         return True
 

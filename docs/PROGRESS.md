@@ -269,15 +269,23 @@ ceilings, and context limits. No Jev, service, CLI, or harness work.
   `None` and never cause a positive rejection, and known incompatibilities
   reject candidates, current configurations, and fallbacks alike. Required
   output raises the resolved effective limit within the known ceiling and is
-  never silently shrunk. Context checks reserve the effective output limit and
-  use only caller-supplied token facts, never the bounded judge state.
+  never silently shrunk. Context checks use only caller-supplied token facts,
+  never the bounded judge state. Known input that exceeds a known context
+  limit is rejected even when the output reservation is unknown; otherwise
+  the effective output limit is added when known, or the explicit required
+  output when known. Unknown output is not treated as a zero-token
+  reservation and no fit is claimed for it.
 
 ### Verification
 
-- `uv run pytest -q` passed: 106 tests. New regression tests cover the five
-  findings, known-incompatible versus unknown facts, both judge-success and
-  judge-failure fallback history restrictions, and invalid current
-  configuration during tool continuation.
+- `uv run pytest -q` passed: 113 tests. Coverage includes the five findings,
+  known-incompatible versus unknown facts, both judge-success and
+  judge-failure fallback history restrictions, invalid current configuration
+  during tool continuation, and seven context-validation regressions
+  (first-turn and tool continuation; input-only and input-plus-required
+  overflow; valid boundary and unknown-fit guards). Running the four overflow
+  regressions against the pre-fix router failed as expected, confirming they
+  protect the fix.
 - `uv run ruff format --check src tests` passed.
 - `uv run ruff check src tests` passed.
 - `uv run mypy` passed (10 source files).
@@ -285,9 +293,9 @@ ceilings, and context limits. No Jev, service, CLI, or harness work.
 
 ### Remaining milestone work
 
-- `EffectiveConfiguration` cannot distinguish "no explicit output limit" from
-  "unknown output limit"; `None` is treated as unknown and is never checked
-  against context or requirement facts.
+- `EffectiveConfiguration.output_limit = None` still cannot distinguish "no
+  explicit output limit" from "unknown output limit"; it is never treated as a
+  zero-token reservation, and no fit is claimed for the unknown part.
 - Context and output fit depend on caller-supplied facts. There is no
   tokenizer, no live discovery, and no inference from the judge state.
 - Application-failure events, per-session sequencing, acknowledgments, TTL

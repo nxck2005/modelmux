@@ -879,3 +879,106 @@ async def test_reported_output_ceiling_intersects_with_configuration() -> None:
 
     assert decision.action is RouteAction.STOP
     assert decision.reason_code is ReasonCode.INVALID_CURRENT
+
+
+async def test_unknown_output_input_overflow_rejects_first_turn_candidate() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_context_limit=8000)
+    request = _request(
+        current_input_tokens=9000,
+        available=_availability("normal"),
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.NO_COMPATIBLE_PROFILE
+
+
+async def test_context_overflow_candidate_uses_compatible_fallback() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_context_limit=8000)
+
+    decision = await Router(config, judge).route(_request(current_input_tokens=9000))
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.COMPATIBILITY_FALLBACK
+    assert decision.target is not None
+    assert decision.target.profile_id == "hard"
+
+
+async def test_unknown_output_input_overflow_stops_tool_continuation() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_context_limit=8000)
+    request = _request(
+        current=_current("normal"),
+        event_kind=EventKind.TOOL_CONTINUATION,
+        current_input_tokens=9000,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INVALID_CURRENT
+
+
+async def test_unknown_output_input_plus_required_overflow_stops_tool_continuation() -> (
+    None
+):
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_context_limit=8000)
+    request = _request(
+        current=_current("normal"),
+        event_kind=EventKind.TOOL_CONTINUATION,
+        current_input_tokens=7500,
+        required_output_tokens=1000,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.STOP
+    assert decision.reason_code is ReasonCode.INVALID_CURRENT
+
+
+async def test_unknown_output_with_known_input_that_fits_is_retained() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_context_limit=8000)
+    request = _request(
+        current=_current("normal"),
+        event_kind=EventKind.TOOL_CONTINUATION,
+        current_input_tokens=7000,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.KEEP
+    assert decision.reason_code is ReasonCode.TOOL_CONTINUATION
+
+
+async def test_known_output_at_context_boundary_is_valid() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(normal_context_limit=8000)
+    request = _request(
+        current=_current("normal", output_limit=1000),
+        event_kind=EventKind.TOOL_CONTINUATION,
+        current_input_tokens=7000,
+    )
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.KEEP
+    assert decision.reason_code is ReasonCode.TOOL_CONTINUATION
+
+
+async def test_first_turn_output_at_context_boundary_is_accepted() -> None:
+    judge = _FakeJudge(_profile_values())
+    config = _config(
+        normal_output=OutputLimits(default=1000, max=2000),
+        normal_context_limit=8000,
+    )
+    request = _request(current_input_tokens=7000, available=_availability("normal"))
+
+    decision = await Router(config, judge).route(request)
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.DEFAULT_PROFILE
