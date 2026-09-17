@@ -103,3 +103,66 @@ not implemented.
 
 State extraction and offline judges: TaskState and TaskProfile contracts, the
 static and rule-based judges, and policy evaluation over the configured rules.
+
+## Milestone 1B: task-state extraction and offline judges
+
+### Scope
+
+A caller can supply harness-neutral task content, obtain a bounded TaskState,
+and evaluate it with a static or rule-based judge. Policy evaluation, routing,
+Jev, the service, CLI, and harness integration remain unimplemented.
+
+### Created
+
+- `src/modelmux/types.py`: shared `Identifier`/`Score`/`NonNegativeInt`
+  aliases plus `TaskProfile`, `BoundedText`, `TaskState`, `ObservationKind`,
+  `JudgeResult`, and the `task-profile-v1` question version.
+- `src/modelmux/state.py`: `MessageRecord`, `ToolRecord`, and the
+  deterministic `extract_task_state` function.
+- `src/modelmux/judges/base.py`: the `TaskJudge` Protocol.
+- `src/modelmux/judges/static.py` and `judges/rules.py`: offline judges.
+- `tests/test_types.py`, `tests/test_state.py`, `tests/test_judges.py`.
+- README section and refreshed `tests/README.md`.
+- `config.py` now imports the shared `Identifier`, `Score`, and
+  `NonNegativeInt` aliases from `types.py` instead of defining them locally.
+
+### Decisions
+
+- Extraction caps: latest user 6,000 characters; instructions 2,000; recent
+  history 3,000; tool excerpts 1,000 (12,000 total). A block longer than the
+  remaining budget keeps head and tail around a fixed truncation marker that
+  is counted inside the cap. History is selected newest-first and restored to
+  chronological order.
+- `BoundedText.omitted_chars` counts original characters not retained; the
+  marker occupies part of the cap, so it is not simply
+  `len(original) - len(retained)`.
+- `TaskState` records the exact supplied message count and UTF-8 text bytes,
+  exact tool count and names, and explicit omission counts. These describe the
+  supplied window only, not the session or the provider request. No tokenizer
+  or generated summaries are used.
+- Score validation now rejects booleans and non-numeric values as well as NaN,
+  infinities, and values outside [0, 1]. This also strengthens configured
+  static-judge scores from 1A.
+- `StaticTaskJudge` returns configured scores with
+  `observation_kind=heuristic`; `RuleBasedTaskJudge` uses one small cue table,
+  defaults to normal-compatible scores, and treats explicitly mechanical work
+  as routine only when no reasoning or high-consequence cue is present.
+- Judges return `judge_id` and the question version, leave `model_id` None, and
+  never see the model catalog. `JudgeResult` usage/cost reporting is deferred
+  until a judge can observe it.
+
+### Verification
+
+- `uv run pytest -q` passed: 52 tests.
+- `uv run ruff format --check src tests` passed.
+- `uv run ruff check src tests` passed.
+- `uv run mypy` passed (8 source files).
+- No network, coverage, or integration checks were run.
+
+### Next
+
+Deterministic policy evaluation and the routing core: match `TaskProfile`
+against configured policy rules, apply compatibility, fallback, and
+rank/hysteresis decisions, and produce a harness-neutral routing decision.
+Jev, the service, CLI, and harness integration remain later work.
+

@@ -8,9 +8,11 @@ policy, and judge logic; separate harness integrations will provide facts and
 apply the core's decisions. Jev is planned as an optional implementation
 behind a replaceable judge interface.
 
-Validated configuration loading is implemented: model profiles, router profile
-references, ordered policy rules, and judge selection are read from TOML.
-Policy evaluation, judge calls, routing decisions, the service, and harness
+Validated configuration loading, bounded task-state extraction, and offline
+judges are implemented. Model profiles, router references, ordered policy
+rules, and judge selection are read from TOML; supplied message content is
+turned into a bounded `TaskState` and evaluated by a static or rule-based
+judge. Policy evaluation, routing decisions, the service, and harness
 integrations are not implemented yet.
 
 ## Configuration
@@ -57,6 +59,28 @@ Validation checks syntax, types, ranges, profile references, and output limits.
 It cannot verify that a provider account can access a model. Jev configuration
 stores the name of an environment variable; the credential is resolved when
 the judge is created, not while loading configuration.
+
+## Task state and judges
+
+Extraction is deterministic and harness-neutral. The caller supplies message,
+instruction, and tool text; the result is a bounded `TaskState` that records
+truncation and omission counts. `StaticTaskJudge` returns configured scores and
+`RuleBasedTaskJudge` is a small conservative cue baseline. Both report
+heuristic observations, never see the model catalog, and never recommend a
+model.
+
+```python
+from modelmux.judges.rules import RuleBasedTaskJudge
+from modelmux.state import MessageRecord, extract_task_state
+
+state = extract_task_state([MessageRecord(role="user", text="rename the config key")])
+result = await RuleBasedTaskJudge().evaluate(state)
+```
+
+Selected text is capped at 6,000 characters for the latest user message, 2,000
+for instructions, 3,000 for recent history, and 1,000 for tool excerpts.
+Extraction reads only the supplied records: it does not read files, the
+environment, or URLs.
 
 ## Development
 

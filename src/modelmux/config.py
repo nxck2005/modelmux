@@ -18,11 +18,10 @@ from pydantic import (
     model_validator,
 )
 
-Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+from modelmux.types import Identifier, NonNegativeInt, Score
+
 EnvVarName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
-Score = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
 PositiveInt = Annotated[int, Field(strict=True, ge=1)]
-NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
 
