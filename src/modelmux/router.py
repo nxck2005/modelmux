@@ -1,0 +1,463 @@
+"""Harness-independent routing over validated configuration and one judge."""
+
+from __future__ import annotations
+
+import asyncio
+from enum import StrEnum
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from modelmux.config import ModelProfile, RouterConfig
+from modelmux.judges.base import JudgeError, TaskJudge
+from modelmux.policy import match_rule
+from modelmux.types import (
+    QUESTION_VERSION,
+    Identifier,
+    JudgeResult,
+    NonNegativeInt,
+    ObservationKind,
+    TaskState,
+)
+
+_STRICT = ConfigDict(extra="forbid", frozen=True)
+
+
+class EventKind(StrEnum):
+    """The caller event that triggered routing."""
+
+    NEW_USER_TURN = "new_user_turn"
+    TOOL_CONTINUATION = "tool_continuation"
+
+
+class RouteAction(StrEnum):
+    """The proposed routing action.
+
+    ``keep`` and ``defer`` leave the current configuration in effect; ``switch``
+    replaces it; ``stop`` means no valid configuration can execute.
+    """
+
+    KEEP = "keep"
+    SWITCH = "switch"
+    DEFER = "defer"
+    STOP = "stop"
+
+
+class ReasonCode(StrEnum):
+    """Why a decision was made."""
+
+    RULE_MATCH = "rule_match"
+    DEFAULT_PROFILE = "default_profile"
+    ECONOMY_VETOED = "economy_vetoed"
+    RETAINED_CURRENT = "retained_current"
+    ESCALATED = "escalated"
+    COMPATIBILITY_FALLBACK = "compatibility_fallback"
+    JUDGMENT_FALLBACK = "judgment_fallback"
+    JUDGE_TIMEOUT = "judge_timeout"
+    JUDGE_UNAVAILABLE = "judge_unavailable"
+    TOOL_CONTINUATION = "tool_continuation"
+    UNSAFE_BOUNDARY = "unsafe_boundary"
+    INCOMPATIBLE_HISTORY = "incompatible_history"
+    CANDIDATE_UNAVAILABLE = "candidate_unavailable"
+    NO_COMPATIBLE_PROFILE = "no_compatible_profile"
+    INVALID_CURRENT = "invalid_current"
+    INCOMPLETE_STATE = "incomplete_state"
+
+
+class EffectiveConfiguration(BaseModel):
+    """A fully resolved profile/provider/model/effort/output selection."""
+
+    model_config = _STRICT
+
+    profile_id: Identifier
+    provider: Identifier
+    model: Identifier
+    reasoning_effort: Identifier | None = None
+    output_limit: NonNegativeInt | None = None
+
+
+class ProfileAvailability(BaseModel):
+    """Caller-reported availability and capabilities for one profile."""
+
+    model_config = _STRICT
+
+    profile_id: Identifier
+    capabilities: frozenset[Identifier] = frozenset()
+
+
+class RoutingRequest(BaseModel):
+    """A harness-neutral routing request.
+
+    Correlation fields are echoed into the decision. A decision is a proposal
+    only; the caller owns the actually applied configuration.
+    """
+
+    model_config = _STRICT
+
+    request_id: Identifier
+    session_id: Identifier
+    user_turn_id: Identifier
+    session_revision: NonNegativeInt
+    event_kind: EventKind
+    task_state: TaskState | None = None
+    current: EffectiveConfiguration | None = None
+    available_profiles: tuple[ProfileAvailability, ...] = ()
+    required_capabilities: frozenset[Identifier] = frozenset()
+    safe_to_apply_before_generation: bool = True
+    history_portable: bool = True
+
+    @model_validator(mode="after")
+    def _event_requirements(self) -> RoutingRequest:
+        if self.event_kind is EventKind.NEW_USER_TURN and self.task_state is None:
+            raise ValueError("new_user_turn requires task_state")
+        if self.event_kind is EventKind.TOOL_CONTINUATION and self.current is None:
+            raise ValueError("tool_continuation requires a current configuration")
+        seen: set[str] = set()
+        for available in self.available_profiles:
+            if available.profile_id in seen:
+                raise ValueError(
+                    f"duplicate available profile {available.profile_id!r}"
+                )
+            seen.add(available.profile_id)
+        return self
+
+
+class RouteDecision(BaseModel):
+    """A proposed routing action for the caller to apply."""
+
+    model_config = _STRICT
+
+    decision_id: Identifier
+    request_id: Identifier
+    session_id: Identifier
+    user_turn_id: Identifier
+    session_revision: NonNegativeInt
+    action: RouteAction
+    target: EffectiveConfiguration | None = None
+    reason_code: ReasonCode
+    matched_rule_id: Identifier | None = None
+    judge_id: Identifier | None = None
+    observation_kind: ObservationKind | None = None
+    question_version: Identifier = QUESTION_VERSION
+
+    @property
+    def continues_with_current(self) -> bool:
+        """Whether the caller may keep generating with the current route."""
+        return self.action in (RouteAction.KEEP, RouteAction.DEFER)
+
+
+class Router:
+    """Deterministic routing over validated configuration and one judge."""
+
+    def __init__(self, config: RouterConfig, judge: TaskJudge) -> None:
+        self._config = config
+        self._judge = judge
+
+    async def route(self, request: RoutingRequest) -> RouteDecision:
+        if request.event_kind is EventKind.TOOL_CONTINUATION:
+            return self._continuation_decision(request)
+
+        state = request.task_state
+        assert state is not None
+        try:
+            async with asyncio.timeout(self._config.judge.deadline_ms / 1000):
+                result = await self._judge.evaluate(state)
+        except TimeoutError:
+            return self._judge_failure_decision(request, ReasonCode.JUDGE_TIMEOUT)
+        except JudgeError:
+            return self._judge_failure_decision(request, ReasonCode.JUDGE_UNAVAILABLE)
+        return self._turn_decision(request, state, result)
+
+    def _turn_decision(
+        self, request: RoutingRequest, state: TaskState, result: JudgeResult
+    ) -> RouteDecision:
+        rule = match_rule(result.profile, self._config.policy.rules)
+        if rule is not None:
+            candidate_id, reason, matched_rule_id = (
+                rule.route,
+                ReasonCode.RULE_MATCH,
+                rule.id,
+            )
+        else:
+            candidate_id, reason, matched_rule_id = (
+                self._config.router.default,
+                ReasonCode.DEFAULT_PROFILE,
+                None,
+            )
+
+        if candidate_id == self._config.router.economy and _state_incomplete(state):
+            candidate_id = self._config.router.default
+            reason = ReasonCode.ECONOMY_VETOED
+            if candidate_id == self._config.router.economy:
+                return self._decision(
+                    request,
+                    RouteAction.STOP,
+                    ReasonCode.INCOMPLETE_STATE,
+                    result=result,
+                )
+
+        if request.current is None:
+            return self._first_decision(
+                request, candidate_id, reason, matched_rule_id, result
+            )
+        return self._active_decision(
+            request, candidate_id, reason, matched_rule_id, result
+        )
+
+    def _first_decision(
+        self,
+        request: RoutingRequest,
+        candidate_id: str,
+        reason: ReasonCode,
+        matched_rule_id: str | None,
+        result: JudgeResult,
+    ) -> RouteDecision:
+        if self._eligible(candidate_id, request) is not None:
+            if not request.safe_to_apply_before_generation:
+                return self._decision(
+                    request, RouteAction.STOP, ReasonCode.UNSAFE_BOUNDARY, result=result
+                )
+            return self._proposal(
+                request, candidate_id, reason, matched_rule_id, result
+            )
+
+        fallback_id = self._config.router.compatibility_fallback
+        if self._eligible(fallback_id, request) is not None:
+            if not request.safe_to_apply_before_generation:
+                return self._decision(
+                    request, RouteAction.STOP, ReasonCode.UNSAFE_BOUNDARY, result=result
+                )
+            return self._proposal(
+                request,
+                fallback_id,
+                ReasonCode.COMPATIBILITY_FALLBACK,
+                matched_rule_id,
+                result,
+            )
+        return self._decision(
+            request, RouteAction.STOP, ReasonCode.NO_COMPATIBLE_PROFILE, result=result
+        )
+
+    def _active_decision(
+        self,
+        request: RoutingRequest,
+        candidate_id: str,
+        reason: ReasonCode,
+        matched_rule_id: str | None,
+        result: JudgeResult,
+    ) -> RouteDecision:
+        current = request.current
+        assert current is not None
+        if self._eligible(current.profile_id, request) is None:
+            return self._compatibility_decision(request, result)
+
+        current_profile = self._config.profiles[current.profile_id]
+        candidate_profile = self._config.profiles[candidate_id]
+        if candidate_profile.rank <= current_profile.rank:
+            return self._decision(
+                request,
+                RouteAction.KEEP,
+                ReasonCode.RETAINED_CURRENT,
+                target=current,
+                matched_rule_id=matched_rule_id,
+                result=result,
+            )
+
+        if self._eligible(candidate_id, request) is None:
+            fallback_id = self._config.router.compatibility_fallback
+            fallback_profile = self._eligible(fallback_id, request)
+            if fallback_profile is not None and self._switch_safe(
+                request, current, fallback_profile
+            ):
+                return self._proposal(
+                    request,
+                    fallback_id,
+                    ReasonCode.COMPATIBILITY_FALLBACK,
+                    matched_rule_id,
+                    result,
+                )
+            return self._decision(
+                request,
+                RouteAction.DEFER,
+                ReasonCode.CANDIDATE_UNAVAILABLE,
+                matched_rule_id=matched_rule_id,
+                result=result,
+            )
+
+        if not request.safe_to_apply_before_generation:
+            return self._decision(
+                request,
+                RouteAction.DEFER,
+                ReasonCode.UNSAFE_BOUNDARY,
+                matched_rule_id=matched_rule_id,
+                result=result,
+            )
+        if not self._history_compatible(request, current, candidate_profile):
+            return self._decision(
+                request,
+                RouteAction.DEFER,
+                ReasonCode.INCOMPATIBLE_HISTORY,
+                matched_rule_id=matched_rule_id,
+                result=result,
+            )
+        return self._proposal(
+            request, candidate_id, ReasonCode.ESCALATED, matched_rule_id, result
+        )
+
+    def _compatibility_decision(
+        self, request: RoutingRequest, result: JudgeResult
+    ) -> RouteDecision:
+        fallback_id = self._config.router.compatibility_fallback
+        if self._eligible(fallback_id, request) is not None:
+            if not request.safe_to_apply_before_generation:
+                return self._decision(
+                    request, RouteAction.STOP, ReasonCode.UNSAFE_BOUNDARY, result=result
+                )
+            return self._proposal(
+                request, fallback_id, ReasonCode.COMPATIBILITY_FALLBACK, None, result
+            )
+        return self._decision(
+            request, RouteAction.STOP, ReasonCode.NO_COMPATIBLE_PROFILE, result=result
+        )
+
+    def _continuation_decision(self, request: RoutingRequest) -> RouteDecision:
+        current = request.current
+        assert current is not None
+        if self._eligible(current.profile_id, request) is None:
+            return self._decision(request, RouteAction.STOP, ReasonCode.INVALID_CURRENT)
+        return self._decision(
+            request,
+            RouteAction.KEEP,
+            ReasonCode.TOOL_CONTINUATION,
+            target=current,
+        )
+
+    def _judge_failure_decision(
+        self, request: RoutingRequest, reason: ReasonCode
+    ) -> RouteDecision:
+        current = request.current
+        if (
+            current is not None
+            and self._eligible(current.profile_id, request) is not None
+        ):
+            return self._decision(request, RouteAction.KEEP, reason, target=current)
+
+        fallback_id = self._config.router.judgment_fallback
+        if self._eligible(fallback_id, request) is not None:
+            if not request.safe_to_apply_before_generation:
+                return self._decision(
+                    request, RouteAction.STOP, ReasonCode.UNSAFE_BOUNDARY
+                )
+            return self._proposal(
+                request, fallback_id, ReasonCode.JUDGMENT_FALLBACK, None, None
+            )
+        return self._decision(
+            request, RouteAction.STOP, ReasonCode.NO_COMPATIBLE_PROFILE
+        )
+
+    def _eligible(
+        self, profile_id: str, request: RoutingRequest
+    ) -> ModelProfile | None:
+        profile = self._config.profiles.get(profile_id)
+        if profile is None:
+            return None
+        capabilities = next(
+            (
+                available.capabilities
+                for available in request.available_profiles
+                if available.profile_id == profile_id
+            ),
+            None,
+        )
+        if capabilities is None:
+            return None
+        required = request.required_capabilities
+        if not required <= capabilities:
+            return None
+        if not required <= set(profile.capabilities):
+            return None
+        return profile
+
+    @staticmethod
+    def _history_compatible(
+        request: RoutingRequest,
+        current: EffectiveConfiguration,
+        candidate_profile: ModelProfile,
+    ) -> bool:
+        return (
+            request.history_portable or candidate_profile.provider == current.provider
+        )
+
+    def _switch_safe(
+        self,
+        request: RoutingRequest,
+        current: EffectiveConfiguration,
+        candidate_profile: ModelProfile,
+    ) -> bool:
+        if not request.safe_to_apply_before_generation:
+            return False
+        return self._history_compatible(request, current, candidate_profile)
+
+    def _proposal(
+        self,
+        request: RoutingRequest,
+        profile_id: str,
+        reason: ReasonCode,
+        matched_rule_id: str | None,
+        result: JudgeResult | None,
+    ) -> RouteDecision:
+        profile = self._config.profiles[profile_id]
+        return self._decision(
+            request,
+            RouteAction.SWITCH,
+            reason,
+            target=_resolve(profile_id, profile),
+            matched_rule_id=matched_rule_id,
+            result=result,
+        )
+
+    @staticmethod
+    def _decision(
+        request: RoutingRequest,
+        action: RouteAction,
+        reason: ReasonCode,
+        *,
+        target: EffectiveConfiguration | None = None,
+        matched_rule_id: str | None = None,
+        result: JudgeResult | None = None,
+    ) -> RouteDecision:
+        return RouteDecision(
+            decision_id=uuid4().hex,
+            request_id=request.request_id,
+            session_id=request.session_id,
+            user_turn_id=request.user_turn_id,
+            session_revision=request.session_revision,
+            action=action,
+            target=target,
+            reason_code=reason,
+            matched_rule_id=matched_rule_id,
+            judge_id=result.judge_id if result is not None else None,
+            observation_kind=result.observation_kind if result is not None else None,
+        )
+
+
+def _resolve(profile_id: str, profile: ModelProfile) -> EffectiveConfiguration:
+    output_limit = profile.output.default if profile.output is not None else None
+    return EffectiveConfiguration(
+        profile_id=profile_id,
+        provider=profile.provider,
+        model=profile.model,
+        reasoning_effort=profile.reasoning_effort,
+        output_limit=output_limit,
+    )
+
+
+def _state_incomplete(state: TaskState) -> bool:
+    if state.latest_user is None or state.latest_user.truncated:
+        return True
+    blocks = state.history + state.instructions + state.tool_excerpts
+    if any(block.truncated for block in blocks):
+        return True
+    return bool(
+        state.history_omitted or state.instructions_omitted or state.tools_omitted
+    )

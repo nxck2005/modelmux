@@ -8,12 +8,13 @@ policy, and judge logic; separate harness integrations will provide facts and
 apply the core's decisions. Jev is planned as an optional implementation
 behind a replaceable judge interface.
 
-Validated configuration loading, bounded task-state extraction, and offline
-judges are implemented. Model profiles, router references, ordered policy
-rules, and judge selection are read from TOML; supplied message content is
-turned into a bounded `TaskState` and evaluated by a static or rule-based
-judge. Policy evaluation, routing decisions, the service, and harness
-integrations are not implemented yet.
+Validated configuration loading, bounded task-state extraction, offline
+judges, policy evaluation, and routing decisions are implemented. Model
+profiles, router references, ordered policy rules, and judge selection are
+read from TOML; supplied message content is turned into a bounded `TaskState`,
+evaluated by a static or rule-based judge, and resolved into a routing
+decision. The local service, Jev, and harness integrations are not implemented
+yet.
 
 ## Configuration
 
@@ -60,7 +61,7 @@ It cannot verify that a provider account can access a model. Jev configuration
 stores the name of an environment variable; the credential is resolved when
 the judge is created, not while loading configuration.
 
-## Task state and judges
+## Task state, judges, and routing
 
 Extraction is deterministic and harness-neutral. The caller supplies message,
 instruction, and tool text; the result is a bounded `TaskState` that records
@@ -69,12 +70,37 @@ truncation and omission counts. `StaticTaskJudge` returns configured scores and
 heuristic observations, never see the model catalog, and never recommend a
 model.
 
+`Router` evaluates one `TaskState` with an injected judge and returns a
+`RouteDecision` with action `keep`, `switch`, `defer`, or `stop`. Decisions are
+proposals: the caller applies the resolved target and owns the result. A
+profile is eligible only when it is configured and the caller reports it
+available with the required capabilities. Ineligible candidates use one
+checked compatibility fallback; a judge failure retains the current route or
+uses the judgment fallback; tool continuations bypass the judge.
+
 ```python
-from modelmux.judges.rules import RuleBasedTaskJudge
+from modelmux.config import load_config
+from modelmux.judges import build_judge
+from modelmux.router import ProfileAvailability, Router, RoutingRequest
 from modelmux.state import MessageRecord, extract_task_state
 
+config = load_config("examples/router.toml")
+router = Router(config, build_judge(config.judge))
+
 state = extract_task_state([MessageRecord(role="user", text="rename the config key")])
-result = await RuleBasedTaskJudge().evaluate(state)
+request = RoutingRequest(
+    request_id="r1",
+    session_id="s1",
+    user_turn_id="t1",
+    session_revision=1,
+    event_kind="new_user_turn",
+    task_state=state,
+    available_profiles=tuple(
+        ProfileAvailability(profile_id=name, capabilities=frozenset({"text", "tools"}))
+        for name in config.profiles
+    ),
+)
+decision = await router.route(request)
 ```
 
 Selected text is capped at 6,000 characters for the latest user message, 2,000

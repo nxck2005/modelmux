@@ -166,3 +166,69 @@ against configured policy rules, apply compatibility, fallback, and
 rank/hysteresis decisions, and produce a harness-neutral routing decision.
 Jev, the service, CLI, and harness integration remain later work.
 
+## Milestone 1C: routing core using the offline judges
+
+### Scope
+
+A caller can supply task state, a current effective configuration, and
+available capabilities, then receive a structured routing decision. Jev,
+generation, HTTP service, CLI, and harness integration remain unimplemented.
+
+### Created
+
+- `src/modelmux/policy.py`: pure first-match evaluation over configured rules
+  and comparison operators.
+- `src/modelmux/router.py`: `EventKind`, `RouteAction`, `ReasonCode`,
+  `EffectiveConfiguration`, `ProfileAvailability`, `RoutingRequest`,
+  `RouteDecision`, and `Router`.
+- `src/modelmux/judges/base.py`: `JudgeError` for expected judge failures.
+- `src/modelmux/judges/__init__.py`: `build_judge` for the configured
+  static/rules judge; Jev raises as unimplemented.
+- `tests/test_policy.py` and `tests/test_router.py`, including one end-to-end
+  offline scenario from `examples/router.toml` through the static judge.
+- README routing example and this handoff.
+
+### Decisions
+
+- Eligibility is the intersection of configured profiles and caller-reported
+  availability, and required capabilities must appear in both the report and
+  the configured profile. Prompt text never authorizes a model, and judge
+  output is never used as a model identifier.
+- Exactly one compatibility fallback is attempted, and only when the switch is
+  safe (`safe_to_apply_before_generation`) and the history is compatible.
+  Otherwise the router defers with the current route or stops.
+- `keep` and `defer` leave the current configuration in effect;
+  `RouteDecision.continues_with_current` states that explicitly. `stop` means
+  no valid configuration can execute. `switch` carries a fully resolved
+  profile/provider/model/effort/output target; unresolved context fit is not
+  claimed.
+- Incomplete judge state (missing or truncated latest user text, or any
+  omitted/truncated block) vetoes an economy-profile candidate. The veto
+  redirects to the router default; if the default is also the economy profile
+  the router stops with `incomplete_state`.
+- Escalation requires a higher-rank candidate, an eligible profile, a safe
+  boundary, and history that can move (portable, or the same provider). Equal
+  or lower rank keeps the current route; there is no automatic de-escalation.
+- Tool continuations never call the judge. An unavailable or unconfigured
+  current route stops with `invalid_current` rather than switching mid-loop.
+- Expected judge failures are `JudgeError` and the configured deadline
+  (`TimeoutError`). They retain an eligible current route, otherwise use the
+  configured judgment fallback. Other exceptions and caller cancellation
+  propagate, and `asyncio.timeout` cancels the judge call in place.
+- Application-failure events, per-session sequencing, acknowledgments, TTL
+  state, config digests, notification flags, and usage/cost are deferred to
+  the integration or service milestones.
+
+### Verification
+
+- `uv run pytest -q` passed: 82 tests.
+- `uv run ruff format --check src tests` passed.
+- `uv run ruff check src tests` passed.
+- `uv run mypy` passed (10 source files).
+- No network, live provider, coverage, or integration checks were run.
+
+### Next
+
+`JevTaskJudge` with an injected async client, explicit credential resolution,
+and deadline failure mapping, plus application-failure routing. After that:
+the versioned local service and CLI.

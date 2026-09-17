@@ -7,6 +7,13 @@ from typing import Protocol
 from modelmux.types import JudgeResult, TaskState
 
 
+class JudgeError(Exception):
+    """An expected judge failure: unavailable, network, or schema.
+
+    Programmer faults must not be reported as JudgeError.
+    """
+
+
 class TaskJudge(Protocol):
     """Evaluates bounded task state.
 
