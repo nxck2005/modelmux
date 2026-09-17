@@ -25,6 +25,7 @@ Write the minimum code necessary to solve the current problem.
 - Prefer simple control flow and early returns over unnecessary nesting.
 - Avoid accumulating special cases, fallback paths, defensive branches, and compatibility paths without a concrete requirement.
 - If the implementation is becoming much larger than the problem, simplify it.
+- Prefer to never use subagents as they're expensive but if they provide a very substantial benefit, ask me before using them.
 
 ## Complexity Budget
 
