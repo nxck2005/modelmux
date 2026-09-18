@@ -63,9 +63,11 @@ def extract_task_state(
         history_records = [(message.role, message.text) for message in messages]
     else:
         source, text = messages[latest_index].role, messages[latest_index].text
+        label, label_truncated = _label(source)
         bounded, omitted_chars = _truncate(text, LATEST_USER_CHARS)
         latest_user = BoundedText(
-            source=_label(source),
+            source=label,
+            source_truncated=label_truncated,
             text=bounded,
             truncated=omitted_chars > 0,
             omitted_chars=omitted_chars,
@@ -94,7 +96,9 @@ def extract_task_state(
     provided_text = [message.text for message in messages]
     provided_text.extend(item.text for item in instructions)
     provided_text.extend(item.text for item in tools)
-    tool_names = tuple(_label(item.name) for item in tools[:MAX_TOOL_NAMES])
+    retained_names = [_label(item.name) for item in tools[:MAX_TOOL_NAMES]]
+    tool_names = tuple(label for label, _ in retained_names)
+    tool_names_truncated = sum(1 for _, truncated in retained_names if truncated)
 
     return TaskState(
         latest_user=latest_user,
@@ -109,6 +113,7 @@ def extract_task_state(
         tool_count=len(tools),
         tool_names=tool_names,
         tool_names_omitted=len(tools) - len(tool_names),
+        tool_names_truncated=tool_names_truncated,
     )
 
 
@@ -119,8 +124,8 @@ def _latest_user_index(messages: Sequence[MessageRecord]) -> int | None:
     return None
 
 
-def _label(source: str) -> str:
-    return source[:MAX_SOURCE_CHARS]
+def _label(source: str) -> tuple[str, bool]:
+    return source[:MAX_SOURCE_CHARS], len(source) > MAX_SOURCE_CHARS
 
 
 def _truncate(text: str, cap: int) -> tuple[str, int]:
@@ -149,10 +154,12 @@ def _select(
         if len(selected) >= limit:
             omitted += 1
             continue
+        label, label_truncated = _label(source)
         if len(text) <= remaining:
             selected.append(
                 BoundedText(
-                    source=_label(source),
+                    source=label,
+                    source_truncated=label_truncated,
                     text=text,
                     truncated=False,
                     omitted_chars=0,
@@ -163,7 +170,8 @@ def _select(
             bounded, omitted_chars = _truncate(text, remaining)
             selected.append(
                 BoundedText(
-                    source=_label(source),
+                    source=label,
+                    source_truncated=label_truncated,
                     text=bounded,
                     truncated=True,
                     omitted_chars=omitted_chars,

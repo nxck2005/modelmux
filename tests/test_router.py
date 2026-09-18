@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -21,8 +22,9 @@ from modelmux.router import (
     Router,
     RoutingRequest,
 )
-from modelmux.state import MessageRecord, extract_task_state
+from modelmux.state import MessageRecord, ToolRecord, extract_task_state
 from modelmux.types import (
+    MAX_SOURCE_CHARS,
     QUESTION_VERSION,
     JudgeResult,
     ObservationKind,
@@ -333,6 +335,53 @@ async def test_extraction_omissions_veto_economy() -> None:
     assert state.history_omitted > 0
 
     decision = await Router(_config(), judge).route(_request(state))
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.ECONOMY_VETOED
+    assert decision.target is not None
+    assert decision.target.profile_id == "normal"
+
+
+def _state_with_clipped_history_sources() -> TaskState:
+    prefix = "r" * MAX_SOURCE_CHARS
+    state = extract_task_state(
+        [
+            MessageRecord(role=f"{prefix}-first", text="first"),
+            MessageRecord(role=f"{prefix}-second", text="second"),
+            MessageRecord(role="user", text="latest"),
+        ]
+    )
+    assert [block.source for block in state.history] == [prefix, prefix]
+    assert all(block.source_truncated for block in state.history)
+    return state
+
+
+def _state_with_clipped_tool_names() -> TaskState:
+    prefix = "t" * MAX_SOURCE_CHARS
+    state = extract_task_state(
+        [MessageRecord(role="user", text="call the tools")],
+        tools=[
+            ToolRecord(name=f"{prefix}-first", text="first tool"),
+            ToolRecord(name=f"{prefix}-second", text="second tool"),
+        ],
+    )
+    assert state.tool_names == (prefix, prefix)
+    assert state.tool_names_truncated == 2
+    assert all(block.source_truncated for block in state.tool_excerpts)
+    return state
+
+
+@pytest.mark.parametrize(
+    "make_state",
+    [_state_with_clipped_history_sources, _state_with_clipped_tool_names],
+    ids=["history-source", "tool-names"],
+)
+async def test_shortened_source_labels_veto_economy(
+    make_state: Callable[[], TaskState],
+) -> None:
+    judge = _FakeJudge(_profile_values(routine=0.95, reasoning_demand=0.10))
+
+    decision = await Router(_config(), judge).route(_request(make_state()))
 
     assert decision.action is RouteAction.SWITCH
     assert decision.reason_code is ReasonCode.ECONOMY_VETOED

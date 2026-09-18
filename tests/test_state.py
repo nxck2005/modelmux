@@ -28,11 +28,16 @@ def _block(
     text: str = "",
     source: str = "user",
     *,
+    source_truncated: bool = False,
     truncated: bool = False,
     omitted: int = 0,
 ) -> BoundedText:
     return BoundedText(
-        source=source, text=text, truncated=truncated, omitted_chars=omitted
+        source=source,
+        source_truncated=source_truncated,
+        text=text,
+        truncated=truncated,
+        omitted_chars=omitted,
     )
 
 
@@ -50,6 +55,7 @@ def _state(**overrides: object) -> TaskState:
         "tool_count": 0,
         "tool_names": (),
         "tool_names_omitted": 0,
+        "tool_names_truncated": 0,
     }
     values.update(overrides)
     return TaskState(**values)
@@ -71,6 +77,7 @@ def test_directly_deserialized_state_rejects_oversized_text() -> None:
     payload["history"] = [
         {
             "source": "user",
+            "source_truncated": False,
             "text": "x" * (HISTORY_CHARS + 1),
             "truncated": False,
             "omitted_chars": 0,
@@ -151,13 +158,36 @@ def test_extraction_truncates_long_source_labels() -> None:
     ]
 
     state = extract_task_state(
-        messages, tools=[ToolRecord(name="t" * 200, text="description")]
+        messages,
+        instructions=[MessageRecord(role="i" * 200, text="instruction")],
+        tools=[ToolRecord(name="t" * 200, text="description")],
     )
 
     assert state.latest_user is not None
     assert state.latest_user.source == "user"
+    assert state.latest_user.source_truncated is False
     assert state.history[0].source == "a" * MAX_SOURCE_CHARS
+    assert state.history[0].source_truncated is True
+    assert state.instructions[0].source == "i" * MAX_SOURCE_CHARS
+    assert state.instructions[0].source_truncated is True
+    assert state.tool_excerpts[0].source == "t" * MAX_SOURCE_CHARS
+    assert state.tool_excerpts[0].source_truncated is True
     assert state.tool_names == ("t" * MAX_SOURCE_CHARS,)
+    assert state.tool_names_truncated == 1
+
+
+def test_extraction_counts_only_retained_truncated_tool_names() -> None:
+    prefix = "t" * MAX_SOURCE_CHARS
+    tools = [
+        ToolRecord(name=f"{prefix}-{index}", text="")
+        for index in range(MAX_TOOL_NAMES + 3)
+    ]
+
+    state = extract_task_state([], tools=tools)
+
+    assert state.tool_names == (prefix,) * MAX_TOOL_NAMES
+    assert state.tool_names_truncated == MAX_TOOL_NAMES
+    assert state.tool_names_omitted == 3
 
 
 def test_normal_complete_input_revalidates_unchanged() -> None:
@@ -170,8 +200,10 @@ def test_normal_complete_input_revalidates_unchanged() -> None:
     state = extract_task_state(messages)
 
     assert [block.text for block in state.history] == ["hello", "hi"]
+    assert all(block.source_truncated is False for block in state.history)
     assert state.history_omitted == 0
     assert state.tool_names_omitted == 0
+    assert state.tool_names_truncated == 0
     assert TaskState.model_validate_json(state.model_dump_json()) == state
 
 

@@ -8,6 +8,7 @@
   "task_state": {
     "latest_user": {
       "source": "user",
+      "source_truncated": false,
       "text": "rename the config key to retries",
       "truncated": false,
       "omitted_chars": 0
@@ -22,7 +23,8 @@
     "input_bytes": 32,
     "tool_count": 0,
     "tool_names": [],
-    "tool_names_omitted": 0
+    "tool_names_omitted": 0,
+    "tool_names_truncated": 0
   },
   "current": null,
   "last_applied_decision_id": null,

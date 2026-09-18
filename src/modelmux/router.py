@@ -873,14 +873,16 @@ def _resolve(
 
 
 def _state_incomplete(state: TaskState) -> bool:
-    if state.latest_user is None or state.latest_user.truncated:
+    latest = state.latest_user
+    if latest is None or latest.truncated or latest.source_truncated:
         return True
     blocks = state.history + state.instructions + state.tool_excerpts
-    if any(block.truncated for block in blocks):
+    if any(block.truncated or block.source_truncated for block in blocks):
         return True
     return bool(
         state.history_omitted
         or state.instructions_omitted
         or state.tools_omitted
         or state.tool_names_omitted
+        or state.tool_names_truncated
     )

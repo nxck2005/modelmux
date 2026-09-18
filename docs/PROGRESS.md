@@ -676,4 +676,61 @@ and generated schemas.
 Milestone 1 core scope is met. Real Jev responses, application sequencing,
 acknowledgment enforcement, TTL/session state, the local service, CLI, and
 harness integration remain unimplemented and unverified; those are
-Milestone 2+ work. No unresolved findings remain from this repair series.
+Milestone 2+ work. The claim that no unresolved findings remained was later
+found to be wrong: source and tool labels were still silently clipped. The
+following repair section fixes that gap.
+
+## Milestone 1 label-truncation repair
+
+### Scope
+
+Fix the remaining Milestone 1 review finding: extraction silently clipped
+source and tool labels to 32 characters, so two distinct names sharing that
+prefix became indistinguishable while every omission/truncation flag still
+claimed a complete state. The router could therefore route to the economy
+profile on corrupted evidence. No service, CLI, harness, session storage, or
+Milestone 2 work.
+
+### Behavior changes
+
+- `BoundedText.source_truncated` records that a source label was shortened to
+  the 32-character cap. It is set for latest-user, history, instruction, and
+  tool-excerpt labels. Removed label characters are not added to
+  `omitted_chars`, which continues to count body text only.
+- `TaskState.tool_names_truncated` counts retained tool names whose labels were
+  shortened. `tool_names_omitted` still counts names dropped by the record cap,
+  and the exact supplied records and measured counts are unchanged.
+- `_state_incomplete` treats any shortened source label or tool name as
+  information loss, so the economy-profile veto and fallback restrictions apply
+  even when no body text was trimmed.
+- Normal, untrimmed input is unchanged apart from the new
+  `source_truncated=false` / `tool_names_truncated=0` metadata.
+- The v1 request schema and fixture were regenerated for the two new fields.
+  Label, text, record, and serialized-state bounds are unchanged.
+
+### Verification
+
+- New parameterized regression `test_shortened_source_labels_veto_economy`
+  covers a clipped history source label and two long tool names sharing their
+  first 32 characters. Both extracted states report label loss, and the router
+  vetoes the routine rule's cheap candidate (`routine=0.95`,
+  `reasoning_demand=0.10`) and selects the default profile with
+  `economy_vetoed` instead.
+- Mutation check: with `_state_incomplete` reverted to its pre-fix checks, both
+  parameter cases route to cheap with `rule_match`; they fail, confirming the
+  regression protects the fix.
+- `uv run pytest tests/test_state.py tests/test_router.py
+  tests/test_contracts.py tests/test_jev.py tests/test_types.py
+  tests/test_judges.py -q` passed: 166 tests, including the schema drift check
+  against the regenerated contracts.
+- `uv run ruff format --check src tests scripts`, `uv run ruff check src tests
+  scripts`, and `uv run mypy` passed (12 source files).
+- Offline only; no live calls.
+
+### Completion correction
+
+The previous section's claim that no unresolved findings remained was wrong:
+the label-clipping behavior above was still present when Milestone 1 was
+declared complete. With this repair, that specific gap is closed; the earlier
+remaining work list (live Jev verification, application sequencing, TTL state,
+service, CLI, and harness integration) is unchanged.

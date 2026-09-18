@@ -2,13 +2,17 @@
   "$defs": {
     "BoundedText": {
       "additionalProperties": false,
-      "description": "Text retained for judging, with its source and truncation facts.",
+      "description": "Text retained for judging, with its source and truncation facts.\n\n``source_truncated`` records that the source label was shortened to the\nlabel cap; removed label characters are never counted in ``omitted_chars``.",
       "properties": {
         "source": {
           "maxLength": 32,
           "minLength": 1,
           "title": "Source",
           "type": "string"
+        },
+        "source_truncated": {
+          "title": "Source Truncated",
+          "type": "boolean"
         },
         "text": {
           "maxLength": 6000,
@@ -27,6 +31,7 @@
       },
       "required": [
         "source",
+        "source_truncated",
         "text",
         "truncated",
         "omitted_chars"
@@ -182,7 +187,7 @@
     },
     "TaskState": {
       "additionalProperties": false,
-      "description": "Bounded, harness-neutral task content supplied to a judge.\n\nText budgets are enforced per category, retained record counts and source\nlabels have fixed caps, and the serialized state must fit\n``MAX_STATE_BYTES``. The category text sums and the serialized byte cap\nare Python-side checks that standard JSON Schema cannot express.\nMeasured counts (``message_count``, ``input_bytes``, ``tool_count``)\ndescribe the supplied input and are independent of what was retained.",
+      "description": "Bounded, harness-neutral task content supplied to a judge.\n\nText budgets are enforced per category, retained record counts and source\nlabels have fixed caps, and the serialized state must fit\n``MAX_STATE_BYTES``. The category text sums and the serialized byte cap\nare Python-side checks that standard JSON Schema cannot express.\nMeasured counts (``message_count``, ``input_bytes``, ``tool_count``)\ndescribe the supplied input and are independent of what was retained.\n``tool_names_truncated`` counts retained names whose labels were shortened;\nlabel loss never contributes to body-text ``omitted_chars``.",
       "properties": {
         "latest_user": {
           "anyOf": [
@@ -262,6 +267,11 @@
           "minimum": 0,
           "title": "Tool Names Omitted",
           "type": "integer"
+        },
+        "tool_names_truncated": {
+          "minimum": 0,
+          "title": "Tool Names Truncated",
+          "type": "integer"
         }
       },
       "required": [
@@ -276,7 +286,8 @@
         "input_bytes",
         "tool_count",
         "tool_names",
-        "tool_names_omitted"
+        "tool_names_omitted",
+        "tool_names_truncated"
       ],
       "title": "TaskState",
       "type": "object"

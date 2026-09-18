@@ -77,11 +77,16 @@ class TaskProfile(BaseModel):
 
 
 class BoundedText(BaseModel):
-    """Text retained for judging, with its source and truncation facts."""
+    """Text retained for judging, with its source and truncation facts.
+
+    ``source_truncated`` records that the source label was shortened to the
+    label cap; removed label characters are never counted in ``omitted_chars``.
+    """
 
     model_config = _STRICT
 
     source: SourceLabel
+    source_truncated: bool
     text: Annotated[str, Field(max_length=LATEST_USER_CHARS)]
     truncated: bool
     omitted_chars: NonNegativeInt
@@ -96,6 +101,8 @@ class TaskState(BaseModel):
     are Python-side checks that standard JSON Schema cannot express.
     Measured counts (``message_count``, ``input_bytes``, ``tool_count``)
     describe the supplied input and are independent of what was retained.
+    ``tool_names_truncated`` counts retained names whose labels were shortened;
+    label loss never contributes to body-text ``omitted_chars``.
     """
 
     model_config = _STRICT
@@ -116,6 +123,7 @@ class TaskState(BaseModel):
     tool_count: NonNegativeInt
     tool_names: Annotated[tuple[SourceLabel, ...], Field(max_length=MAX_TOOL_NAMES)]
     tool_names_omitted: NonNegativeInt
+    tool_names_truncated: NonNegativeInt
 
     @model_validator(mode="after")
     def _within_bounds(self) -> TaskState:
