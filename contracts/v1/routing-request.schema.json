@@ -5,11 +5,13 @@
       "description": "Text retained for judging, with its source and truncation facts.",
       "properties": {
         "source": {
+          "maxLength": 32,
           "minLength": 1,
           "title": "Source",
           "type": "string"
         },
         "text": {
+          "maxLength": 6000,
           "title": "Text",
           "type": "string"
         },
@@ -180,7 +182,7 @@
     },
     "TaskState": {
       "additionalProperties": false,
-      "description": "Bounded, harness-neutral task content supplied to a judge.\n\nCounts and byte sizes describe only the records supplied to extraction.\nThey are exact for that provided window and say nothing about the full\nsession or the provider generation request.",
+      "description": "Bounded, harness-neutral task content supplied to a judge.\n\nText budgets are enforced per category, retained record counts and source\nlabels have fixed caps, and the serialized state must fit\n``MAX_STATE_BYTES``. The category text sums and the serialized byte cap\nare Python-side checks that standard JSON Schema cannot express.\nMeasured counts (``message_count``, ``input_bytes``, ``tool_count``)\ndescribe the supplied input and are independent of what was retained.",
       "properties": {
         "latest_user": {
           "anyOf": [
@@ -196,6 +198,7 @@
           "items": {
             "$ref": "#/$defs/BoundedText"
           },
+          "maxItems": 32,
           "title": "Instructions",
           "type": "array"
         },
@@ -203,6 +206,7 @@
           "items": {
             "$ref": "#/$defs/BoundedText"
           },
+          "maxItems": 64,
           "title": "History",
           "type": "array"
         },
@@ -210,6 +214,7 @@
           "items": {
             "$ref": "#/$defs/BoundedText"
           },
+          "maxItems": 32,
           "title": "Tool Excerpts",
           "type": "array"
         },
@@ -245,11 +250,18 @@
         },
         "tool_names": {
           "items": {
+            "maxLength": 32,
             "minLength": 1,
             "type": "string"
           },
+          "maxItems": 32,
           "title": "Tool Names",
           "type": "array"
+        },
+        "tool_names_omitted": {
+          "minimum": 0,
+          "title": "Tool Names Omitted",
+          "type": "integer"
         }
       },
       "required": [
@@ -263,13 +275,101 @@
         "message_count",
         "input_bytes",
         "tool_count",
-        "tool_names"
+        "tool_names",
+        "tool_names_omitted"
       ],
       "title": "TaskState",
       "type": "object"
     }
   },
   "additionalProperties": false,
+  "allOf": [
+    {
+      "else": {
+        "properties": {
+          "rejected_effective": {
+            "type": "null"
+          },
+          "recovery_used": {
+            "const": false
+          },
+          "application_failure_code": {
+            "type": "null"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "event_kind": {
+            "const": "application_failed"
+          }
+        },
+        "required": [
+          "event_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "rejected_effective": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "rejected_effective"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_kind": {
+            "const": "new_user_turn"
+          }
+        },
+        "required": [
+          "event_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "task_state": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "task_state"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_kind": {
+            "const": "tool_continuation"
+          }
+        },
+        "required": [
+          "event_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "current": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "current"
+        ]
+      }
+    }
+  ],
   "description": "A harness-neutral routing request.\n\nCorrelation fields are echoed into the decision. A decision is a proposal\nonly; the caller owns the actually applied configuration. ``None`` token\nor support facts are unknown, not zero.\n\nFor ``application_failed`` events the caller must identify the effective\nselection whose application was rejected (``rejected_effective``) and set\n``recovery_used=True`` when the failed application was already a\ncompatibility-fallback recovery proposed by the core. The core never\nre-proposes ``rejected_effective`` and stops once ``recovery_used``.",
   "properties": {
     "request_id": {

@@ -283,6 +283,36 @@ async def test_invalid_json_is_a_safe_judge_error(
     assert str(excinfo.value) == "jev response was not valid JSON"
 
 
+async def test_redirects_are_not_followed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_ENV, "super-secret-key")
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(
+            302,
+            headers={"location": "https://redirect.example/collect"},
+            json={"error": "raw-response-secret"},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=True
+    ) as client:
+        judge = JevTaskJudge(JevJudgeConfig(api_key_env=_ENV), client)
+        with pytest.raises(JudgeError) as excinfo:
+            await judge.evaluate(_state())
+
+    assert urls == [_ENDPOINT]
+    message = str(excinfo.value)
+    assert "302" in message
+    assert "super-secret-key" not in message
+    assert "raw-response-secret" not in message
+    assert "redirect.example" not in message
+    assert "now diagnose the flaky test" not in message
+
+
 async def test_absent_usage_and_model_stay_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

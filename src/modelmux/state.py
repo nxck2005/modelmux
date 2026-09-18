@@ -6,12 +6,20 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict
 
-from modelmux.types import BoundedText, Identifier, TaskState
-
-LATEST_USER_CHARS = 6_000
-INSTRUCTIONS_CHARS = 2_000
-HISTORY_CHARS = 3_000
-TOOLS_CHARS = 1_000
+from modelmux.types import (
+    HISTORY_CHARS,
+    INSTRUCTIONS_CHARS,
+    LATEST_USER_CHARS,
+    MAX_HISTORY_RECORDS,
+    MAX_INSTRUCTION_RECORDS,
+    MAX_SOURCE_CHARS,
+    MAX_TOOL_NAMES,
+    MAX_TOOL_RECORDS,
+    TOOLS_CHARS,
+    BoundedText,
+    Identifier,
+    TaskState,
+)
 
 _TRUNCATION_MARKER = "\n[...truncated...]\n"
 _USER_ROLE = "user"
@@ -57,7 +65,7 @@ def extract_task_state(
         source, text = messages[latest_index].role, messages[latest_index].text
         bounded, omitted_chars = _truncate(text, LATEST_USER_CHARS)
         latest_user = BoundedText(
-            source=source,
+            source=_label(source),
             text=bounded,
             truncated=omitted_chars > 0,
             omitted_chars=omitted_chars,
@@ -67,18 +75,26 @@ def extract_task_state(
         ]
 
     history, history_omitted = _select(
-        history_records, HISTORY_CHARS, newest_first=True
+        history_records,
+        HISTORY_CHARS,
+        limit=MAX_HISTORY_RECORDS,
+        newest_first=True,
     )
     instruction_blocks, instructions_omitted = _select(
-        [(item.role, item.text) for item in instructions], INSTRUCTIONS_CHARS
+        [(item.role, item.text) for item in instructions],
+        INSTRUCTIONS_CHARS,
+        limit=MAX_INSTRUCTION_RECORDS,
     )
     tool_blocks, tools_omitted = _select(
-        [(item.name, item.text) for item in tools], TOOLS_CHARS
+        [(item.name, item.text) for item in tools],
+        TOOLS_CHARS,
+        limit=MAX_TOOL_RECORDS,
     )
 
     provided_text = [message.text for message in messages]
     provided_text.extend(item.text for item in instructions)
     provided_text.extend(item.text for item in tools)
+    tool_names = tuple(_label(item.name) for item in tools[:MAX_TOOL_NAMES])
 
     return TaskState(
         latest_user=latest_user,
@@ -91,7 +107,8 @@ def extract_task_state(
         message_count=len(messages),
         input_bytes=sum(len(text.encode("utf-8")) for text in provided_text),
         tool_count=len(tools),
-        tool_names=tuple(item.name for item in tools),
+        tool_names=tool_names,
+        tool_names_omitted=len(tools) - len(tool_names),
     )
 
 
@@ -100,6 +117,10 @@ def _latest_user_index(messages: Sequence[MessageRecord]) -> int | None:
         if messages[index].role == _USER_ROLE:
             return index
     return None
+
+
+def _label(source: str) -> str:
+    return source[:MAX_SOURCE_CHARS]
 
 
 def _truncate(text: str, cap: int) -> tuple[str, int]:
@@ -114,23 +135,35 @@ def _truncate(text: str, cap: int) -> tuple[str, int]:
 
 
 def _select(
-    blocks: Sequence[tuple[str, str]], budget: int, *, newest_first: bool = False
+    blocks: Sequence[tuple[str, str]],
+    budget: int,
+    *,
+    limit: int,
+    newest_first: bool = False,
 ) -> tuple[tuple[BoundedText, ...], int]:
     ordered = reversed(blocks) if newest_first else blocks
     selected: list[BoundedText] = []
     remaining = budget
     omitted = 0
     for source, text in ordered:
+        if len(selected) >= limit:
+            omitted += 1
+            continue
         if len(text) <= remaining:
             selected.append(
-                BoundedText(source=source, text=text, truncated=False, omitted_chars=0)
+                BoundedText(
+                    source=_label(source),
+                    text=text,
+                    truncated=False,
+                    omitted_chars=0,
+                )
             )
             remaining -= len(text)
         elif remaining >= len(_TRUNCATION_MARKER):
             bounded, omitted_chars = _truncate(text, remaining)
             selected.append(
                 BoundedText(
-                    source=source,
+                    source=_label(source),
                     text=bounded,
                     truncated=True,
                     omitted_chars=omitted_chars,

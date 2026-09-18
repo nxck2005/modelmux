@@ -14,7 +14,9 @@ The injected ``httpx.AsyncClient`` is owned by the caller. Missing credentials,
 transport or HTTP failures, invalid JSON, and responses that do not match the
 documented schema raise ``JudgeError``; the Router applies its normal fallback
 behavior. No retries and no separate deadline are implemented here: the
-Router's ``deadline_ms`` bounds the whole evaluation.
+Router's ``deadline_ms`` bounds the whole evaluation. Redirects are disabled
+on the request itself, so an injected client configured to follow them cannot
+forward task state to another host.
 """
 
 from __future__ import annotations
@@ -128,6 +130,7 @@ class JevTaskJudge:
                 _ENDPOINT,
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json=_request_payload(self._config.model, state),
+                follow_redirects=False,
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:

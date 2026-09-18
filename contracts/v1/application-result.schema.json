@@ -67,6 +67,56 @@
     }
   },
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "applied"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "applied": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "applied"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "failure_code": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "failure_code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "rejected"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      }
+    }
+  ],
   "description": "The caller's report of what actually happened after a decision.\n\nOnly ``applied`` acknowledges that the harness uses the reported effective\nconfiguration. The other statuses mean no switch is confirmed; the caller\ncarries its actual state into the next request.",
   "properties": {
     "decision_id": {

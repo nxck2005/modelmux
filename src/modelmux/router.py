@@ -7,24 +7,148 @@ import hashlib
 import json
 import time
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from modelmux.config import ModelProfile, PositiveInt, RouterConfig
 from modelmux.judges.base import JudgeError, TaskJudge
 from modelmux.policy import match_rule
 from modelmux.types import (
-    QUESTION_VERSION,
     Identifier,
     JudgeResult,
     NonNegativeInt,
-    ObservationKind,
     TaskState,
 )
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
+
+_DECISION_SCHEMA_EXTRA: dict[str, Any] = {
+    "allOf": [
+        {
+            "if": {
+                "required": ["action"],
+                "properties": {"action": {"const": "keep"}},
+            },
+            "then": {
+                "required": ["target"],
+                "properties": {"target": {"not": {"type": "null"}}},
+            },
+        },
+        {
+            "if": {
+                "required": ["action"],
+                "properties": {"action": {"const": "switch"}},
+            },
+            "then": {
+                "required": ["target"],
+                "properties": {"target": {"not": {"type": "null"}}},
+            },
+        },
+        {
+            "if": {
+                "required": ["action"],
+                "properties": {"action": {"const": "defer"}},
+            },
+            "then": {
+                "properties": {
+                    "target": {"type": "null"},
+                    "notify_on_applied": {"const": False},
+                }
+            },
+        },
+        {
+            "if": {
+                "required": ["action"],
+                "properties": {"action": {"const": "stop"}},
+            },
+            "then": {
+                "properties": {
+                    "target": {"type": "null"},
+                    "notify_on_applied": {"const": False},
+                }
+            },
+        },
+        {
+            "if": {
+                "required": ["notify_on_applied"],
+                "properties": {"notify_on_applied": {"const": True}},
+            },
+            "then": {
+                "required": ["action"],
+                "properties": {"action": {"const": "switch"}},
+            },
+        },
+    ]
+}
+
+_APPLICATION_RESULT_SCHEMA_EXTRA: dict[str, Any] = {
+    "allOf": [
+        {
+            "if": {
+                "required": ["status"],
+                "properties": {"status": {"const": "applied"}},
+            },
+            "then": {
+                "required": ["applied"],
+                "properties": {"applied": {"not": {"type": "null"}}},
+            },
+        },
+        {
+            "if": {
+                "required": ["failure_code"],
+                "properties": {"failure_code": {"not": {"type": "null"}}},
+            },
+            "then": {
+                "required": ["status"],
+                "properties": {"status": {"const": "rejected"}},
+            },
+        },
+    ]
+}
+
+_ROUTING_REQUEST_SCHEMA_EXTRA: dict[str, Any] = {
+    "allOf": [
+        {
+            "if": {
+                "required": ["event_kind"],
+                "properties": {"event_kind": {"const": "application_failed"}},
+            },
+            "then": {
+                "required": ["rejected_effective"],
+                "properties": {"rejected_effective": {"not": {"type": "null"}}},
+            },
+            "else": {
+                "properties": {
+                    "rejected_effective": {"type": "null"},
+                    "recovery_used": {"const": False},
+                    "application_failure_code": {"type": "null"},
+                }
+            },
+        },
+        {
+            "if": {
+                "required": ["event_kind"],
+                "properties": {"event_kind": {"const": "new_user_turn"}},
+            },
+            "then": {
+                "required": ["task_state"],
+                "properties": {"task_state": {"not": {"type": "null"}}},
+            },
+        },
+        {
+            "if": {
+                "required": ["event_kind"],
+                "properties": {"event_kind": {"const": "tool_continuation"}},
+            },
+            "then": {
+                "required": ["current"],
+                "properties": {"current": {"not": {"type": "null"}}},
+            },
+        },
+    ]
+}
 
 
 class EventKind(StrEnum):
@@ -116,7 +240,9 @@ class RoutingRequest(BaseModel):
     re-proposes ``rejected_effective`` and stops once ``recovery_used``.
     """
 
-    model_config = _STRICT
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, json_schema_extra=_ROUTING_REQUEST_SCHEMA_EXTRA
+    )
 
     request_id: Identifier
     integration_instance_id: Identifier
@@ -174,9 +300,14 @@ class RouteDecision(BaseModel):
 
     A decision never claims that a switch happened; only an ApplicationResult
     with status ``applied`` acknowledges the actual effective configuration.
+    ``observation`` is the exact judge observation used for this decision and
+    is None when no judge was called. ``config_digest`` identifies the routing
+    configuration that produced the decision.
     """
 
-    model_config = _STRICT
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, json_schema_extra=_DECISION_SCHEMA_EXTRA
+    )
 
     decision_id: Identifier
     request_id: Identifier
@@ -188,17 +319,26 @@ class RouteDecision(BaseModel):
     apply_at: Literal["before_next_generation"] = "before_next_generation"
     reason_code: ReasonCode
     matched_rule_id: Identifier | None = None
-    config_digest: str | None = None
-    judge_id: Identifier | None = None
-    observation_kind: ObservationKind | None = None
-    question_version: Identifier = QUESTION_VERSION
+    config_digest: str
+    observation: JudgeResult | None = None
     notify_on_applied: bool = False
-    elapsed_ms: float | None = None
+    elapsed_ms: Annotated[float, Field(ge=0.0, allow_inf_nan=False)] | None = None
 
     @property
     def continues_with_current(self) -> bool:
         """Whether the caller may keep generating with the current route."""
         return self.action in (RouteAction.KEEP, RouteAction.DEFER)
+
+    @model_validator(mode="after")
+    def _action_requirements(self) -> RouteDecision:
+        if self.action in (RouteAction.KEEP, RouteAction.SWITCH):
+            if self.target is None:
+                raise ValueError(f"{self.action.value} requires a resolved target")
+        elif self.target is not None:
+            raise ValueError(f"{self.action.value} must not carry a target")
+        if self.notify_on_applied and self.action is not RouteAction.SWITCH:
+            raise ValueError("only switch requests an applied notification")
+        return self
 
 
 class ApplicationStatus(StrEnum):
@@ -218,7 +358,9 @@ class ApplicationResult(BaseModel):
     carries its actual state into the next request.
     """
 
-    model_config = _STRICT
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, json_schema_extra=_APPLICATION_RESULT_SCHEMA_EXTRA
+    )
 
     decision_id: Identifier
     session_id: Identifier
@@ -248,6 +390,7 @@ class Router:
     def __init__(self, config: RouterConfig, judge: TaskJudge) -> None:
         self._config = config
         self._judge = judge
+        self._config_digest = _routing_config_digest(config)
 
     async def route(self, request: RoutingRequest) -> RouteDecision:
         started = time.perf_counter()
@@ -646,8 +789,8 @@ class Router:
             result=result,
         )
 
-    @staticmethod
     def _decision(
+        self,
         request: RoutingRequest,
         action: RouteAction,
         reason: ReasonCode,
@@ -656,9 +799,6 @@ class Router:
         matched_rule_id: str | None = None,
         result: JudgeResult | None = None,
     ) -> RouteDecision:
-        effective = target
-        if effective is None and action in (RouteAction.KEEP, RouteAction.DEFER):
-            effective = request.current
         return RouteDecision(
             decision_id=uuid4().hex,
             request_id=request.request_id,
@@ -669,9 +809,8 @@ class Router:
             target=target,
             reason_code=reason,
             matched_rule_id=matched_rule_id,
-            config_digest=_config_digest(effective) if effective is not None else None,
-            judge_id=result.judge_id if result is not None else None,
-            observation_kind=result.observation_kind if result is not None else None,
+            config_digest=self._config_digest,
+            observation=result,
             notify_on_applied=action is RouteAction.SWITCH,
         )
 
@@ -713,10 +852,11 @@ def _known_context_limit(
     return min(limits) if limits else None
 
 
-def _config_digest(configuration: EffectiveConfiguration) -> str:
-    canonical = json.dumps(
-        configuration.model_dump(), sort_keys=True, separators=(",", ":")
+def _routing_config_digest(config: RouterConfig) -> str:
+    payload = config.model_dump(
+        mode="json", exclude={"judge": {"jev": {"api_key_env"}}}
     )
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -739,5 +879,8 @@ def _state_incomplete(state: TaskState) -> bool:
     if any(block.truncated for block in blocks):
         return True
     return bool(
-        state.history_omitted or state.instructions_omitted or state.tools_omitted
+        state.history_omitted
+        or state.instructions_omitted
+        or state.tools_omitted
+        or state.tool_names_omitted
     )

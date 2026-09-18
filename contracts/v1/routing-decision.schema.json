@@ -54,6 +54,94 @@
       "title": "EffectiveConfiguration",
       "type": "object"
     },
+    "JudgeResult": {
+      "additionalProperties": false,
+      "description": "One judge observation of a task profile.\n\n``model_id`` is the judge model identity when one exists; offline judges\nleave it None. A judge result never names a model to route to.",
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/TaskProfile"
+        },
+        "observation_kind": {
+          "$ref": "#/$defs/ObservationKind"
+        },
+        "judge_id": {
+          "minLength": 1,
+          "title": "Judge Id",
+          "type": "string"
+        },
+        "question_version": {
+          "default": "task-profile-v1",
+          "minLength": 1,
+          "title": "Question Version",
+          "type": "string"
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Id"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "profile",
+        "observation_kind",
+        "judge_id"
+      ],
+      "title": "JudgeResult",
+      "type": "object"
+    },
+    "JudgeUsage": {
+      "additionalProperties": false,
+      "description": "Token usage reported by a judge. Unknown values are None.",
+      "properties": {
+        "input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Tokens"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        }
+      },
+      "title": "JudgeUsage",
+      "type": "object"
+    },
     "ObservationKind": {
       "description": "Whether scores are model probabilities or a heuristic.",
       "enum": [
@@ -98,10 +186,164 @@
       ],
       "title": "RouteAction",
       "type": "string"
+    },
+    "TaskProfile": {
+      "additionalProperties": false,
+      "description": "Four independent finite scores in [0, 1].\n\nThe scores are not a distribution and do not sum to one.",
+      "properties": {
+        "reasoning_demand": {
+          "ge": 0.0,
+          "le": 1.0,
+          "title": "Reasoning Demand",
+          "type": "number"
+        },
+        "routine": {
+          "ge": 0.0,
+          "le": 1.0,
+          "title": "Routine",
+          "type": "number"
+        },
+        "underspecified": {
+          "ge": 0.0,
+          "le": 1.0,
+          "title": "Underspecified",
+          "type": "number"
+        },
+        "high_consequence": {
+          "ge": 0.0,
+          "le": 1.0,
+          "title": "High Consequence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "reasoning_demand",
+        "routine",
+        "underspecified",
+        "high_consequence"
+      ],
+      "title": "TaskProfile",
+      "type": "object"
     }
   },
   "additionalProperties": false,
-  "description": "A proposed routing action for the caller to apply.\n\nA decision never claims that a switch happened; only an ApplicationResult\nwith status ``applied`` acknowledges the actual effective configuration.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "keep"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "target"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "switch"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "target"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "defer"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "null"
+          },
+          "notify_on_applied": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "stop"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "null"
+          },
+          "notify_on_applied": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "notify_on_applied": {
+            "const": true
+          }
+        },
+        "required": [
+          "notify_on_applied"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "const": "switch"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  ],
+  "description": "A proposed routing action for the caller to apply.\n\nA decision never claims that a switch happened; only an ApplicationResult\nwith status ``applied`` acknowledges the actual effective configuration.\n``observation`` is the exact judge observation used for this decision and\nis None when no judge was called. ``config_digest`` identifies the routing\nconfiguration that produced the decision.",
   "properties": {
     "decision_id": {
       "minLength": 1,
@@ -165,46 +407,19 @@
       "title": "Matched Rule Id"
     },
     "config_digest": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Config Digest"
+      "title": "Config Digest",
+      "type": "string"
     },
-    "judge_id": {
+    "observation": {
       "anyOf": [
         {
-          "minLength": 1,
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Judge Id"
-    },
-    "observation_kind": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ObservationKind"
+          "$ref": "#/$defs/JudgeResult"
         },
         {
           "type": "null"
         }
       ],
       "default": null
-    },
-    "question_version": {
-      "default": "task-profile-v1",
-      "minLength": 1,
-      "title": "Question Version",
-      "type": "string"
     },
     "notify_on_applied": {
       "default": false,
@@ -214,6 +429,7 @@
     "elapsed_ms": {
       "anyOf": [
         {
+          "minimum": 0.0,
           "type": "number"
         },
         {
@@ -231,7 +447,8 @@
     "user_turn_id",
     "session_revision",
     "action",
-    "reason_code"
+    "reason_code",
+    "config_digest"
   ],
   "title": "RouteDecision",
   "type": "object"

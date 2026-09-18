@@ -21,7 +21,8 @@
     "message_count": 1,
     "input_bytes": 32,
     "tool_count": 0,
-    "tool_names": []
+    "tool_names": [],
+    "tool_names_omitted": 0
   },
   "current": null,
   "last_applied_decision_id": null,

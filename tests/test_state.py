@@ -2,15 +2,177 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
+from pydantic import ValidationError
+
 from modelmux.state import (
     HISTORY_CHARS,
     INSTRUCTIONS_CHARS,
     LATEST_USER_CHARS,
+    MAX_HISTORY_RECORDS,
+    MAX_INSTRUCTION_RECORDS,
+    MAX_SOURCE_CHARS,
+    MAX_TOOL_NAMES,
+    MAX_TOOL_RECORDS,
     TOOLS_CHARS,
     MessageRecord,
     ToolRecord,
     extract_task_state,
 )
+from modelmux.types import MAX_STATE_BYTES, BoundedText, TaskState
+
+
+def _block(
+    text: str = "",
+    source: str = "user",
+    *,
+    truncated: bool = False,
+    omitted: int = 0,
+) -> BoundedText:
+    return BoundedText(
+        source=source, text=text, truncated=truncated, omitted_chars=omitted
+    )
+
+
+def _state(**overrides: object) -> TaskState:
+    values: dict[str, object] = {
+        "latest_user": None,
+        "instructions": (),
+        "history": (),
+        "tool_excerpts": (),
+        "instructions_omitted": 0,
+        "history_omitted": 0,
+        "tools_omitted": 0,
+        "message_count": 0,
+        "input_bytes": 0,
+        "tool_count": 0,
+        "tool_names": (),
+        "tool_names_omitted": 0,
+    }
+    values.update(overrides)
+    return TaskState(**values)
+
+
+def test_direct_state_rejects_oversized_text() -> None:
+    with pytest.raises(ValidationError):
+        _state(latest_user=_block("x" * (LATEST_USER_CHARS + 1)))
+    with pytest.raises(ValidationError):
+        _state(instructions=(_block("x" * (INSTRUCTIONS_CHARS + 1)),))
+    with pytest.raises(ValidationError):
+        _state(history=(_block("x" * (HISTORY_CHARS + 1)),))
+    with pytest.raises(ValidationError):
+        _state(tool_excerpts=(_block("x" * (TOOLS_CHARS + 1)),))
+
+
+def test_directly_deserialized_state_rejects_oversized_text() -> None:
+    payload = json.loads(_state().model_dump_json())
+    payload["history"] = [
+        {
+            "source": "user",
+            "text": "x" * (HISTORY_CHARS + 1),
+            "truncated": False,
+            "omitted_chars": 0,
+        }
+    ]
+
+    with pytest.raises(ValidationError):
+        TaskState.model_validate(payload)
+
+
+def test_direct_state_rejects_record_count_over_limit() -> None:
+    with pytest.raises(ValidationError):
+        _state(history=tuple(_block() for _ in range(MAX_HISTORY_RECORDS + 1)))
+    with pytest.raises(ValidationError):
+        _state(instructions=tuple(_block() for _ in range(MAX_INSTRUCTION_RECORDS + 1)))
+    with pytest.raises(ValidationError):
+        _state(tool_excerpts=tuple(_block() for _ in range(MAX_TOOL_RECORDS + 1)))
+    with pytest.raises(ValidationError):
+        _state(tool_names=tuple(f"t{index}" for index in range(MAX_TOOL_NAMES + 1)))
+
+
+def test_direct_state_rejects_long_source_labels() -> None:
+    with pytest.raises(ValidationError):
+        _block("text", source="s" * (MAX_SOURCE_CHARS + 1))
+    with pytest.raises(ValidationError):
+        _state(tool_names=("t" * (MAX_SOURCE_CHARS + 1),))
+
+
+def test_direct_state_rejects_excessive_serialized_overhead() -> None:
+    with pytest.raises(ValidationError, match=f"exceeds {MAX_STATE_BYTES}"):
+        _state(input_bytes=10 ** (MAX_STATE_BYTES * 2))
+
+
+def test_direct_state_rejects_inconsistent_truncation_metadata() -> None:
+    with pytest.raises(ValidationError):
+        _state(latest_user=_block("text", truncated=True, omitted=0))
+
+
+def test_extraction_bounds_many_empty_records() -> None:
+    messages = [
+        MessageRecord(role="assistant", text="")
+        for _ in range(MAX_HISTORY_RECORDS + 10)
+    ]
+    messages.append(MessageRecord(role="user", text="latest"))
+
+    state = extract_task_state(messages)
+
+    assert len(state.history) == MAX_HISTORY_RECORDS
+    assert state.history_omitted == 10
+    assert state.message_count == MAX_HISTORY_RECORDS + 11
+
+
+def test_extraction_bounds_many_instructions_and_tools() -> None:
+    instructions = [
+        MessageRecord(role="system", text="")
+        for _ in range(MAX_INSTRUCTION_RECORDS + 5)
+    ]
+    tools = [
+        ToolRecord(name=f"tool-{index}", text="")
+        for index in range(MAX_TOOL_RECORDS + 5)
+    ]
+
+    state = extract_task_state([], instructions=instructions, tools=tools)
+
+    assert len(state.instructions) == MAX_INSTRUCTION_RECORDS
+    assert state.instructions_omitted == 5
+    assert len(state.tool_excerpts) == MAX_TOOL_RECORDS
+    assert state.tools_omitted == 5
+    assert state.tool_count == MAX_TOOL_RECORDS + 5
+    assert len(state.tool_names) == MAX_TOOL_NAMES
+    assert state.tool_names_omitted == MAX_TOOL_RECORDS + 5 - MAX_TOOL_NAMES
+
+
+def test_extraction_truncates_long_source_labels() -> None:
+    messages = [
+        MessageRecord(role="a" * 200, text="context"),
+        MessageRecord(role="user", text="latest"),
+    ]
+
+    state = extract_task_state(
+        messages, tools=[ToolRecord(name="t" * 200, text="description")]
+    )
+
+    assert state.latest_user is not None
+    assert state.latest_user.source == "user"
+    assert state.history[0].source == "a" * MAX_SOURCE_CHARS
+    assert state.tool_names == ("t" * MAX_SOURCE_CHARS,)
+
+
+def test_normal_complete_input_revalidates_unchanged() -> None:
+    messages = [
+        MessageRecord(role="user", text="hello"),
+        MessageRecord(role="assistant", text="hi"),
+        MessageRecord(role="user", text="latest"),
+    ]
+
+    state = extract_task_state(messages)
+
+    assert [block.text for block in state.history] == ["hello", "hi"]
+    assert state.history_omitted == 0
+    assert state.tool_names_omitted == 0
+    assert TaskState.model_validate_json(state.model_dump_json()) == state
 
 
 def test_extracts_latest_user_history_and_exact_counts() -> None:

@@ -5,10 +5,37 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Final
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+
+LATEST_USER_CHARS = 6_000
+INSTRUCTIONS_CHARS = 2_000
+HISTORY_CHARS = 3_000
+TOOLS_CHARS = 1_000
+
+MAX_INSTRUCTION_RECORDS = 32
+MAX_HISTORY_RECORDS = 64
+MAX_TOOL_RECORDS = 32
+MAX_TOOL_NAMES = 32
+MAX_SOURCE_CHARS = 32
+
+# Enough for the four category budgets under worst-case JSON escaping (a
+# control character costs six ASCII bytes) plus bounded labels and counts.
+MAX_STATE_BYTES = 128 * 1024
+
+SourceLabel = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_SOURCE_CHARS),
+]
 
 
 def _numeric_score(value: object) -> object:
@@ -54,8 +81,8 @@ class BoundedText(BaseModel):
 
     model_config = _STRICT
 
-    source: Identifier
-    text: str
+    source: SourceLabel
+    text: Annotated[str, Field(max_length=LATEST_USER_CHARS)]
     truncated: bool
     omitted_chars: NonNegativeInt
 
@@ -63,24 +90,54 @@ class BoundedText(BaseModel):
 class TaskState(BaseModel):
     """Bounded, harness-neutral task content supplied to a judge.
 
-    Counts and byte sizes describe only the records supplied to extraction.
-    They are exact for that provided window and say nothing about the full
-    session or the provider generation request.
+    Text budgets are enforced per category, retained record counts and source
+    labels have fixed caps, and the serialized state must fit
+    ``MAX_STATE_BYTES``. The category text sums and the serialized byte cap
+    are Python-side checks that standard JSON Schema cannot express.
+    Measured counts (``message_count``, ``input_bytes``, ``tool_count``)
+    describe the supplied input and are independent of what was retained.
     """
 
     model_config = _STRICT
 
     latest_user: BoundedText | None
-    instructions: tuple[BoundedText, ...]
-    history: tuple[BoundedText, ...]
-    tool_excerpts: tuple[BoundedText, ...]
+    instructions: Annotated[
+        tuple[BoundedText, ...], Field(max_length=MAX_INSTRUCTION_RECORDS)
+    ]
+    history: Annotated[tuple[BoundedText, ...], Field(max_length=MAX_HISTORY_RECORDS)]
+    tool_excerpts: Annotated[
+        tuple[BoundedText, ...], Field(max_length=MAX_TOOL_RECORDS)
+    ]
     instructions_omitted: NonNegativeInt
     history_omitted: NonNegativeInt
     tools_omitted: NonNegativeInt
     message_count: NonNegativeInt
     input_bytes: NonNegativeInt
     tool_count: NonNegativeInt
-    tool_names: tuple[Identifier, ...]
+    tool_names: Annotated[tuple[SourceLabel, ...], Field(max_length=MAX_TOOL_NAMES)]
+    tool_names_omitted: NonNegativeInt
+
+    @model_validator(mode="after")
+    def _within_bounds(self) -> TaskState:
+        categories = (
+            (
+                "latest_user",
+                () if self.latest_user is None else (self.latest_user,),
+                LATEST_USER_CHARS,
+            ),
+            ("instructions", self.instructions, INSTRUCTIONS_CHARS),
+            ("history", self.history, HISTORY_CHARS),
+            ("tool_excerpts", self.tool_excerpts, TOOLS_CHARS),
+        )
+        for name, blocks, budget in categories:
+            if sum(len(block.text) for block in blocks) > budget:
+                raise ValueError(f"{name} text exceeds {budget} characters")
+            for block in blocks:
+                if block.truncated != (block.omitted_chars > 0):
+                    raise ValueError("truncated must match omitted_chars")
+        if len(self.model_dump_json().encode("utf-8")) > MAX_STATE_BYTES:
+            raise ValueError(f"serialized task state exceeds {MAX_STATE_BYTES} bytes")
+        return self
 
 
 class JudgeUsage(BaseModel):

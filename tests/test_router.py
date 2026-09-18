@@ -250,9 +250,10 @@ async def test_default_routing_echoes_correlation() -> None:
     assert decision.session_id == "sess-1"
     assert decision.user_turn_id == "turn-1"
     assert decision.session_revision == 2
-    assert decision.judge_id == "fake"
-    assert decision.observation_kind is ObservationKind.PROBABILITY
-    assert decision.question_version == QUESTION_VERSION
+    assert decision.observation is not None
+    assert decision.observation.judge_id == "fake"
+    assert decision.observation.observation_kind is ObservationKind.PROBABILITY
+    assert decision.observation.question_version == QUESTION_VERSION
     assert decision.decision_id
 
 
@@ -320,6 +321,23 @@ async def test_incomplete_state_vetoes_economy() -> None:
     assert vetoed.target.profile_id == "normal"
     assert routed.target is not None
     assert routed.target.profile_id == "cheap"
+
+
+async def test_extraction_omissions_veto_economy() -> None:
+    judge = _FakeJudge(_profile_values(routine=0.95, reasoning_demand=0.10))
+    messages = [
+        MessageRecord(role="assistant", text=f"note {index}") for index in range(80)
+    ]
+    messages.append(MessageRecord(role="user", text="rename it"))
+    state = extract_task_state(messages)
+    assert state.history_omitted > 0
+
+    decision = await Router(_config(), judge).route(_request(state))
+
+    assert decision.action is RouteAction.SWITCH
+    assert decision.reason_code is ReasonCode.ECONOMY_VETOED
+    assert decision.target is not None
+    assert decision.target.profile_id == "normal"
 
 
 async def test_escalation_switches_at_safe_boundary() -> None:
@@ -552,8 +570,9 @@ async def test_end_to_end_offline_scenario() -> None:
     assert decision.target.model == "example-provider/cheap-placeholder-1"
     assert decision.target.reasoning_effort == "low"
     assert decision.target.output_limit == 2048
-    assert decision.judge_id == "static"
-    assert decision.observation_kind is ObservationKind.HEURISTIC
+    assert decision.observation is not None
+    assert decision.observation.judge_id == "static"
+    assert decision.observation.observation_kind is ObservationKind.HEURISTIC
 
 
 async def test_recovery_fallback_respects_bound_history() -> None:
@@ -1059,6 +1078,7 @@ async def test_application_failure_retains_valid_current() -> None:
     assert decision.reason_code is ReasonCode.APPLICATION_FAILED
     assert decision.target == current
     assert decision.notify_on_applied is False
+    assert decision.observation is None
     assert judge.calls == 0
 
 
@@ -1195,9 +1215,12 @@ async def test_serialized_offline_library_flow() -> None:
     assert first.target is not None
     assert first.target.profile_id == "normal"
     assert first.apply_at == "before_next_generation"
-    assert first.config_digest is not None
+    assert first.config_digest
     assert first.notify_on_applied is True
     assert first.elapsed_ms is not None
+    assert first.observation is not None
+    assert first.observation.judge_id == "fake"
+    assert first.observation.profile == judge.profile
     assert "do the thing" not in first.model_dump_json()
     assert RouteDecision.model_validate_json(first.model_dump_json()) == first
 
@@ -1212,7 +1235,9 @@ async def test_serialized_offline_library_flow() -> None:
     assert second.reason_code is ReasonCode.ESCALATED
     assert second.target is not None
     assert second.target.profile_id == "hard"
-    assert second.config_digest != first.config_digest
+    assert second.config_digest == first.config_digest
+    assert second.observation is not None
+    assert second.observation.profile == judge.profile
 
     calls = judge.calls
     third = await router.route(
@@ -1227,6 +1252,7 @@ async def test_serialized_offline_library_flow() -> None:
     assert third.reason_code is ReasonCode.TOOL_CONTINUATION
     assert third.target == second.target
     assert third.config_digest == second.config_digest
+    assert third.observation is None
     assert judge.calls == calls
 
     judge.error = JudgeError("unavailable")
@@ -1239,3 +1265,70 @@ async def test_serialized_offline_library_flow() -> None:
     assert fourth.action is RouteAction.KEEP
     assert fourth.reason_code is ReasonCode.JUDGE_UNAVAILABLE
     assert fourth.target == second.target
+    assert fourth.observation is None
+
+
+async def test_routing_config_digest_tracks_policy_and_judge_changes() -> None:
+    judge = _FakeJudge(_profile_values())
+    base = _config()
+
+    data = base.model_dump()
+    data["policy"]["rules"][0]["conditions"][0]["value"] = 0.95
+    changed_policy = RouterConfig.model_validate(data)
+
+    data = base.model_dump()
+    data["judge"]["deadline_ms"] = 900
+    changed_judge = RouterConfig.model_validate(data)
+
+    first = await Router(base, judge).route(_request())
+    policy_decision = await Router(changed_policy, judge).route(_request())
+    judge_decision = await Router(changed_judge, judge).route(_request())
+
+    assert first.target == policy_decision.target == judge_decision.target
+    assert first.config_digest != policy_decision.config_digest
+    assert first.config_digest != judge_decision.config_digest
+
+
+async def test_routing_config_digest_is_order_independent() -> None:
+    judge = _FakeJudge(_profile_values())
+    base = _config()
+
+    data = base.model_dump()
+    data["profiles"] = dict(reversed(list(data["profiles"].items())))
+    reordered = RouterConfig.model_validate(data)
+
+    first = await Router(base, judge).route(_request())
+    second = await Router(reordered, judge).route(_request())
+
+    assert first.config_digest == second.config_digest
+
+
+async def test_routing_config_digest_excludes_credential_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    judge = _FakeJudge(_profile_values())
+    data = _config().model_dump()
+    data["judge"]["selection"] = "jev"
+    data["judge"]["jev"] = {"api_key_env": "JEV_KEY_A", "model": "jev-latest"}
+    first_config = RouterConfig.model_validate(data)
+    data["judge"]["jev"] = {"api_key_env": "JEV_KEY_B", "model": "jev-latest"}
+    second_config = RouterConfig.model_validate(data)
+
+    monkeypatch.setenv("JEV_KEY_A", "secret-one")
+    first = await Router(first_config, judge).route(_request())
+    monkeypatch.setenv("JEV_KEY_A", "secret-two")
+    second = await Router(second_config, judge).route(_request())
+
+    assert first.config_digest == second.config_digest
+    assert "secret" not in first.config_digest
+
+
+async def test_routing_config_digest_ignores_task_text() -> None:
+    judge = _FakeJudge(_profile_values())
+    router = Router(_config(), judge)
+
+    first = await router.route(_request(_state("prompt one")))
+    second = await router.route(_request(_state("a different prompt")))
+
+    assert first.config_digest == second.config_digest
+    assert "prompt one" not in first.config_digest

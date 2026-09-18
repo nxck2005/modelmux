@@ -15,10 +15,20 @@
   "apply_at": "before_next_generation",
   "reason_code": "rule_match",
   "matched_rule_id": "routine-cheap",
-  "config_digest": "c27026de94431638afd69edd4e3b5aabc0300a697153dbc56b964526c8b92f48",
-  "judge_id": "static",
-  "observation_kind": "heuristic",
-  "question_version": "task-profile-v1",
+  "config_digest": "b758643574f9c98a02313213b6d6013bf484d9bdd41578f4e9afcf9087a3678f",
+  "observation": {
+    "profile": {
+      "reasoning_demand": 0.2,
+      "routine": 0.9,
+      "underspecified": 0.1,
+      "high_consequence": 0.0
+    },
+    "observation_kind": "heuristic",
+    "judge_id": "static",
+    "question_version": "task-profile-v1",
+    "model_id": null,
+    "usage": null
+  },
   "notify_on_applied": true,
   "elapsed_ms": 12.5
 }

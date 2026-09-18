@@ -100,11 +100,16 @@ uv run pytest
 ```
 
 Representative serialized examples live in `contracts/v1/fixtures/`. Decisions
-carry correlation IDs, the action and reason, a credentials-free digest of the
-effective configuration, and a `notify_on_applied` flag; they never contain
-prompt text or secrets. Application results carry the decision identity, a
-status of `applied`, `rejected`, `stale`, or `cancelled`, and the actual
-effective configuration when known.
+carry correlation IDs, the action and reason, a digest of the validated
+routing configuration (credential references excluded), the exact judge
+observation used for routing (scores, observation kind, judge/model identity,
+question version, and reported usage, or null when no judge was called), and a
+`notify_on_applied` flag; they never contain prompt text or secrets.
+Application results carry the decision identity, a status of `applied`,
+`rejected`, `stale`, or `cancelled`, and the actual effective configuration
+when known. The generated schemas also express the cross-field action/target,
+notification, elapsed-time, and application-status invariants for non-Python
+consumers.
 
 ```python
 from modelmux.config import load_config
@@ -118,6 +123,7 @@ router = Router(config, build_judge(config.judge))
 state = extract_task_state([MessageRecord(role="user", text="rename the config key")])
 request = RoutingRequest(
     request_id="r1",
+    integration_instance_id="local-1",
     session_id="s1",
     user_turn_id="t1",
     session_revision=1,
@@ -132,9 +138,12 @@ decision = await router.route(request)
 ```
 
 Selected text is capped at 6,000 characters for the latest user message, 2,000
-for instructions, 3,000 for recent history, and 1,000 for tool excerpts.
-Extraction reads only the supplied records: it does not read files, the
-environment, or URLs.
+for instructions, 3,000 for recent history, and 1,000 for tool excerpts, with
+fixed caps on retained records and source labels. The Python contract also
+enforces the per-category sums and a 128 KiB serialized-state limit; those
+aggregate and serialization checks are runtime validation that standard JSON
+Schema cannot express. Extraction reads only the supplied records: it does not
+read files, the environment, or URLs.
 
 ## Development
 
