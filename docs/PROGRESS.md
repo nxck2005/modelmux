@@ -792,7 +792,9 @@ integration, or gateway was added.
 - `uv run python scripts/generate_contract_schemas.py` regenerated the v1
   schemas; the drift test passes.
 - Offline only; no live API, service, CLI, or harness run.
-- Commits: `56fc697` (reviews) and `030bcf3` (hardening), pushed to `main`.
+- Commits: `56fc697` (reviews), `030bcf3` (hardening), `3417187`
+  (credential control characters), and `d5f99c1` (this documentation), pushed
+  to `main`.
 
 ### Remaining
 
