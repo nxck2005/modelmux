@@ -52,6 +52,10 @@ this version. Reports about them should wait until the relevant code exists;
 the implementation plan records the required controls (loopback bind, bearer
 token, request/concurrency limits, log redaction, and session sequencing).
 
+See [CHANGELOG.md](CHANGELOG.md) for the security-hardening changes and
+compatibility notes, and [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) for the
+audit and remaining limitations.
+
 ## Safe test data
 
 The test suite is offline and uses only fake credentials. Do not replace the

@@ -59,7 +59,9 @@ config = load_config("examples/router.toml")
 Validation checks syntax, types, ranges, profile references, and output limits.
 It cannot verify that a provider account can access a model. Jev configuration
 stores the name of an environment variable; the credential is resolved when
-the judge is created, not while loading configuration.
+the judge is created, not while loading configuration. Loading also bounds the
+configuration to 1 MiB, 128 profiles, and 256 policy rules, and `deadline_ms`
+to 1–600,000.
 
 ## Task state, judges, and routing
 
@@ -125,9 +127,15 @@ reported availability, state, safety, and history facts; a service must
 authenticate the caller before treating them as operational input. Decisions
 carry scores, judge identity, and a configuration digest (provenance, not a
 signature) but never prompt text. Application results are proposals until the
-caller reports `applied`. See [SECURITY.md](SECURITY.md) for the reporting
-policy and [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) for the threat model
-and remaining limitations.
+caller reports `applied`. For request or task-state validation, use
+`modelmux.config.validation_problems(exc)`; raw `ValidationError.errors()` and
+`.json()` include the input value, which may be prompt text. See
+[SECURITY.md](SECURITY.md) for the reporting policy and
+[docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) for the threat model and
+remaining limitations. Hardening details and compatibility notes — scoped Jev
+credential names, `trust_env=False`, identifier/limit bounds, strict booleans,
+judge identity checks, and the configuration snapshot — are in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Versioned contracts
 
@@ -150,7 +158,8 @@ Application results carry the decision identity, a status of `applied`,
 `rejected`, `stale`, or `cancelled`, and the actual effective configuration
 when known. The generated schemas also express the cross-field action/target,
 notification, elapsed-time, and application-status invariants for non-Python
-consumers.
+consumers. They bound identifiers to 256 characters, request/profile
+collections to 64 items, and output-token values to 1,000,000.
 
 ```python
 from modelmux.config import load_config
@@ -180,11 +189,13 @@ decision = await router.route(request)
 
 Selected text is capped at 6,000 characters for the latest user message, 2,000
 for instructions, 3,000 for recent history, and 1,000 for tool excerpts, with
-fixed caps on retained records and source labels. The Python contract also
-enforces the per-category sums and a 128 KiB serialized-state limit; those
-aggregate and serialization checks are runtime validation that standard JSON
-Schema cannot express. Extraction reads only the supplied records: it does not
-read files, the environment, or URLs.
+fixed caps on retained records and source labels. Identifiers are limited to
+256 characters and reject control or bidi characters; a single supplied
+message/tool record is limited to 1,000,000 characters, and output-token values
+to 1,000,000. The Python contract also enforces the per-category sums and a
+128 KiB serialized-state limit; those aggregate and serialization checks are
+runtime validation that standard JSON Schema cannot express. Extraction reads
+only the supplied records: it does not read files, the environment, or URLs.
 
 ## Development
 

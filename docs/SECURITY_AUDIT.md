@@ -32,6 +32,9 @@ is authoritative where the two differ.
 | G1, G3–G5 | Fixed: CI least privilege and SHA pins, `SECURITY.md`, fake test values, credential-file ignore patterns. |
 | G2 | Partially fixed: weekly Dependabot updates for GitHub Actions; Python dependency audit automation remains deferred. |
 
+See [CHANGELOG.md](../CHANGELOG.md) for the exact remediation and compatibility
+notes, and `docs/PROGRESS.md` for the handoff record.
+
 ## How this was done
 
 - Read every tracked file, with a security lens on data flow, trust boundaries,

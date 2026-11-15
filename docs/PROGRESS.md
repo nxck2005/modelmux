@@ -734,3 +734,72 @@ the label-clipping behavior above was still present when Milestone 1 was
 declared complete. With this repair, that specific gap is closed; the earlier
 remaining work list (live Jev verification, application sequencing, TTL state,
 service, CLI, and harness integration) is unchanged.
+
+## Security hardening
+
+### Scope
+
+Apply the actionable findings from `docs/SECURITY_AUDIT.md` to the offline core.
+The audit is a point-in-time analysis at `a4e7a6e`; `CHANGELOG.md` records the
+remediation and compatibility notes. No live Jev call, service, CLI, Harness
+integration, or gateway was added.
+
+### Changed
+
+- `judge.jev.api_key_env` is scoped to `MODELMUX_JEV_*` or `JEV_*`. Empty,
+  whitespace, and control-character credentials fail before a request; the key
+  is held as `SecretStr`.
+- `JevTaskJudge` requires `trust_env=False` on the injected client, streams and
+  caps the response at 64 KiB, and uses a bounded `model` identifier.
+- `Identifier` is limited to 256 characters and rejects `Cc`/`Cf` characters;
+  `MessageRecord.text`/`ToolRecord.text` are limited to 1,000,000 characters.
+- `deadline_ms` is limited to 600,000; output-token values to 1,000,000;
+  configurations to 1 MiB/128 profiles/256 rules; request availability and
+  capability collections to 64 entries (profile capability/effort sets too).
+- Boundary booleans are strict; invalid UTF-8 and NUL paths become
+  `ConfigError`; `validation_problems()` renders validation errors without
+  input values.
+- `Router` checks the judge `judge_id` against the configured selection and
+  snapshots the configuration. A later mutation of the caller's `RouterConfig`
+  does not change routing or the digest; construct a new Router to reload.
+- Jev gained `include_instructions`, `include_history`, and
+  `include_tool_excerpts` (default true). README and `docs/jev.md` document data
+  egress, prompt injection, caller trust, and digest provenance.
+- CI actions are SHA-pinned with read-only permissions, no persisted checkout
+  credentials, and a timeout; Dependabot tracks action pins. Added
+  `SECURITY.md`, `.env.example`, and credential-file ignore patterns.
+
+### Compatibility
+
+- Existing Jev configurations must rename the credential variable to a scoped
+  name and create the client with `trust_env=False`.
+- Custom judges must expose `judge_id` matching `config.judge.selection`.
+- Oversized identifiers, records, deadlines, output limits, profiles, rules, or
+  request collections are now rejected; send real booleans instead of numeric
+  or string equivalents.
+- Jev responses above 64 KiB or with an oversized `model` identifier are
+  rejected and fall back through the Router.
+
+### Verification
+
+- `uv run pytest -q` passed: 228 tests. New regressions cover credential
+  scoping and malformed keys, `trust_env`, response size, oversized model IDs,
+  privacy switches, identifier/record bounds, strict booleans, config error
+  mapping, safe validation errors, judge identity, config snapshots, and schema
+  drift.
+- `uv run ruff format --check src tests scripts`, `uv run ruff check src tests
+  scripts`, and `uv run mypy` passed (12 source files).
+- `uv run python scripts/generate_contract_schemas.py` regenerated the v1
+  schemas; the drift test passes.
+- Offline only; no live API, service, CLI, or harness run.
+- Commits: `56fc697` (reviews) and `030bcf3` (hardening), pushed to `main`.
+
+### Remaining
+
+- Prompt injection, caller-fact trust, digest authenticity, service
+  authentication/sequencing, and a boundary version field remain documented
+  service/v2 work.
+- Automatic prompt/tool-output redaction and Python dependency audit automation
+  remain deferred; the Jev `include_*` switches are the current privacy
+  mitigation.
+- Milestone 2 (service, CLI, OpenCode integration) is unchanged.
