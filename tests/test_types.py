@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from modelmux.types import JudgeResult, TaskProfile
+from modelmux.types import MAX_IDENTIFIER_CHARS, BoundedText, JudgeResult, TaskProfile
 
 VALID_SCORES = {
     "reasoning_demand": 0.5,
@@ -46,4 +46,36 @@ def test_judge_result_rejects_unknown_observation_kind() -> None:
             profile=TaskProfile(**VALID_SCORES),
             observation_kind="calibrated",
             judge_id="test",
+        )
+
+
+def test_judge_result_rejects_oversized_model_id() -> None:
+    with pytest.raises(ValidationError):
+        JudgeResult(
+            profile=TaskProfile(**VALID_SCORES),
+            observation_kind="heuristic",
+            judge_id="test",
+            model_id="m" * (MAX_IDENTIFIER_CHARS + 1),
+        )
+
+
+def test_bounded_text_rejects_control_source() -> None:
+    with pytest.raises(ValidationError):
+        BoundedText(
+            source="a\x1b[31m",
+            source_truncated=False,
+            text="text",
+            truncated=False,
+            omitted_chars=0,
+        )
+
+
+def test_bounded_text_rejects_lax_boolean() -> None:
+    with pytest.raises(ValidationError):
+        BoundedText(
+            source="user",
+            source_truncated=False,
+            text="text",
+            truncated="yes",  # type: ignore[arg-type]
+            omitted_chars=0,
         )

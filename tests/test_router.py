@@ -44,10 +44,12 @@ class _FakeJudge:
         *,
         error: Exception | None = None,
         delay: float = 0.0,
+        judge_id: str = "rules",
     ) -> None:
         self.profile = profile
         self.error = error
         self.delay = delay
+        self.judge_id = judge_id
         self.calls = 0
         self.started = asyncio.Event()
         self.cancelled = asyncio.Event()
@@ -67,7 +69,7 @@ class _FakeJudge:
         return JudgeResult(
             profile=self.profile,
             observation_kind=ObservationKind.PROBABILITY,
-            judge_id="fake",
+            judge_id=self.judge_id,
             question_version=QUESTION_VERSION,
         )
 
@@ -253,7 +255,7 @@ async def test_default_routing_echoes_correlation() -> None:
     assert decision.user_turn_id == "turn-1"
     assert decision.session_revision == 2
     assert decision.observation is not None
-    assert decision.observation.judge_id == "fake"
+    assert decision.observation.judge_id == "rules"
     assert decision.observation.observation_kind is ObservationKind.PROBABILITY
     assert decision.observation.question_version == QUESTION_VERSION
     assert decision.decision_id
@@ -592,6 +594,43 @@ def test_request_rejects_duplicate_availability() -> None:
                 ProfileAvailability(profile_id="normal"),
             ),
         )
+
+
+def test_request_rejects_lax_safety_boolean() -> None:
+    with pytest.raises(ValidationError):
+        _request(safe="yes")  # type: ignore[arg-type]
+
+
+def test_request_rejects_too_many_available_profiles() -> None:
+    with pytest.raises(ValidationError):
+        _request(available=_availability(*(f"profile-{index}" for index in range(65))))
+
+
+def test_request_rejects_output_above_limit() -> None:
+    with pytest.raises(ValidationError):
+        _request(required_output_tokens=1_000_001)
+
+
+def test_request_rejects_too_many_required_capabilities() -> None:
+    with pytest.raises(ValidationError):
+        _request(required=frozenset(f"capability-{index}" for index in range(65)))
+
+
+def test_router_rejects_mismatched_judge() -> None:
+    with pytest.raises(ValueError, match="does not match configured"):
+        Router(_config(), _FakeJudge(_profile_values(), judge_id="jev"))
+
+
+async def test_router_copies_configuration() -> None:
+    config = _config()
+    router = Router(config, _FakeJudge(_profile_values()))
+    config.profiles["normal"] = config.profiles["hard"]
+
+    decision = await router.route(_request())
+
+    assert decision.target is not None
+    assert decision.target.profile_id == "normal"
+    assert decision.target.model == "model-normal"
 
 
 async def test_end_to_end_offline_scenario() -> None:
@@ -1268,7 +1307,7 @@ async def test_serialized_offline_library_flow() -> None:
     assert first.notify_on_applied is True
     assert first.elapsed_ms is not None
     assert first.observation is not None
-    assert first.observation.judge_id == "fake"
+    assert first.observation.judge_id == "rules"
     assert first.observation.profile == judge.profile
     assert "do the thing" not in first.model_dump_json()
     assert RouteDecision.model_validate_json(first.model_dump_json()) == first
@@ -1355,7 +1394,7 @@ async def test_routing_config_digest_is_order_independent() -> None:
 async def test_routing_config_digest_excludes_credential_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    judge = _FakeJudge(_profile_values())
+    judge = _FakeJudge(_profile_values(), judge_id="jev")
     data = _config().model_dump()
     data["judge"]["selection"] = "jev"
     data["judge"]["jev"] = {"api_key_env": "JEV_KEY_A", "model": "jev-latest"}

@@ -16,16 +16,19 @@
       "description": "A fully resolved profile/provider/model/effort/output selection.",
       "properties": {
         "profile_id": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Profile Id",
           "type": "string"
         },
         "provider": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Provider",
           "type": "string"
         },
         "model": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Model",
           "type": "string"
@@ -33,6 +36,7 @@
         "reasoning_effort": {
           "anyOf": [
             {
+              "maxLength": 256,
               "minLength": 1,
               "type": "string"
             },
@@ -46,6 +50,7 @@
         "output_limit": {
           "anyOf": [
             {
+              "maximum": 1000000,
               "minimum": 1,
               "type": "integer"
             },
@@ -120,16 +125,19 @@
   "description": "The caller's report of what actually happened after a decision.\n\nOnly ``applied`` acknowledges that the harness uses the reported effective\nconfiguration. The other statuses mean no switch is confirmed; the caller\ncarries its actual state into the next request.",
   "properties": {
     "decision_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "Decision Id",
       "type": "string"
     },
     "session_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "Session Id",
       "type": "string"
     },
     "user_turn_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "User Turn Id",
       "type": "string"
@@ -156,6 +164,7 @@
     "failure_code": {
       "anyOf": [
         {
+          "maxLength": 256,
           "minLength": 1,
           "type": "string"
         },

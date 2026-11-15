@@ -21,7 +21,12 @@ from modelmux.state import (
     ToolRecord,
     extract_task_state,
 )
-from modelmux.types import MAX_STATE_BYTES, BoundedText, TaskState
+from modelmux.types import (
+    MAX_INPUT_RECORD_CHARS,
+    MAX_STATE_BYTES,
+    BoundedText,
+    TaskState,
+)
 
 
 def _block(
@@ -59,6 +64,11 @@ def _state(**overrides: object) -> TaskState:
     }
     values.update(overrides)
     return TaskState(**values)
+
+
+def test_rejects_oversized_input_record() -> None:
+    with pytest.raises(ValidationError):
+        MessageRecord(role="user", text="x" * (MAX_INPUT_RECORD_CHARS + 1))
 
 
 def test_direct_state_rejects_oversized_text() -> None:

@@ -19,10 +19,15 @@ from modelmux.types import (
     Identifier,
     JudgeResult,
     NonNegativeInt,
+    OutputTokens,
+    StrictBool,
     TaskState,
 )
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
+
+MAX_AVAILABLE_PROFILES = 64
+MAX_REQUIRED_CAPABILITIES = 64
 
 _DECISION_SCHEMA_EXTRA: dict[str, Any] = {
     "allOf": [
@@ -204,7 +209,7 @@ class EffectiveConfiguration(BaseModel):
     provider: Identifier
     model: Identifier
     reasoning_effort: Identifier | None = None
-    output_limit: PositiveInt | None = None
+    output_limit: OutputTokens | None = None
 
 
 class ProfileAvailability(BaseModel):
@@ -219,9 +224,14 @@ class ProfileAvailability(BaseModel):
     model_config = _STRICT
 
     profile_id: Identifier
-    capabilities: frozenset[Identifier] = frozenset()
-    reasoning_efforts: frozenset[Identifier] | None = None
-    max_output_tokens: PositiveInt | None = None
+    capabilities: Annotated[
+        frozenset[Identifier], Field(max_length=MAX_REQUIRED_CAPABILITIES)
+    ] = frozenset()
+    reasoning_efforts: (
+        Annotated[frozenset[Identifier], Field(max_length=MAX_REQUIRED_CAPABILITIES)]
+        | None
+    ) = None
+    max_output_tokens: OutputTokens | None = None
     context_limit: PositiveInt | None = None
     measured_input_tokens: NonNegativeInt | None = None
 
@@ -238,6 +248,10 @@ class RoutingRequest(BaseModel):
     ``recovery_used=True`` when the failed application was already a
     compatibility-fallback recovery proposed by the core. The core never
     re-proposes ``rejected_effective`` and stops once ``recovery_used``.
+
+    The caller is trusted to report availability, task-state, safety, and
+    history facts. A service must authenticate the caller before treating those
+    facts as operational input; prompt text is never authorization.
     """
 
     model_config = ConfigDict(
@@ -253,14 +267,18 @@ class RoutingRequest(BaseModel):
     task_state: TaskState | None = None
     current: EffectiveConfiguration | None = None
     last_applied_decision_id: Identifier | None = None
-    available_profiles: tuple[ProfileAvailability, ...] = ()
-    required_capabilities: frozenset[Identifier] = frozenset()
-    required_output_tokens: PositiveInt | None = None
-    safe_to_apply_before_generation: bool = True
-    history_portable: bool = True
+    available_profiles: Annotated[
+        tuple[ProfileAvailability, ...], Field(max_length=MAX_AVAILABLE_PROFILES)
+    ] = ()
+    required_capabilities: Annotated[
+        frozenset[Identifier], Field(max_length=MAX_REQUIRED_CAPABILITIES)
+    ] = frozenset()
+    required_output_tokens: OutputTokens | None = None
+    safe_to_apply_before_generation: StrictBool = True
+    history_portable: StrictBool = True
     application_failure_code: Identifier | None = None
     rejected_effective: EffectiveConfiguration | None = None
-    recovery_used: bool = False
+    recovery_used: StrictBool = False
 
     @model_validator(mode="after")
     def _event_requirements(self) -> RoutingRequest:
@@ -302,7 +320,7 @@ class RouteDecision(BaseModel):
     with status ``applied`` acknowledges the actual effective configuration.
     ``observation`` is the exact judge observation used for this decision and
     is None when no judge was called. ``config_digest`` identifies the routing
-    configuration that produced the decision.
+    configuration that produced the decision; it is provenance, not a signature.
     """
 
     model_config = ConfigDict(
@@ -321,7 +339,7 @@ class RouteDecision(BaseModel):
     matched_rule_id: Identifier | None = None
     config_digest: str
     observation: JudgeResult | None = None
-    notify_on_applied: bool = False
+    notify_on_applied: StrictBool = False
     elapsed_ms: Annotated[float, Field(ge=0.0, allow_inf_nan=False)] | None = None
 
     @property
@@ -385,12 +403,25 @@ class ApplicationResult(BaseModel):
 
 
 class Router:
-    """Deterministic routing over validated configuration and one judge."""
+    """Deterministic routing over a configuration snapshot and one judge.
+
+    The Router copies the validated configuration, so later mutation of the
+    caller's object cannot change routing or invalidate the cached digest. The
+    injected judge must report the configured ``judge_id``; this keeps a
+    static configuration from silently using a remote judge.
+    """
 
     def __init__(self, config: RouterConfig, judge: TaskJudge) -> None:
-        self._config = config
+        self._config = config.model_copy(deep=True)
         self._judge = judge
-        self._config_digest = _routing_config_digest(config)
+        expected = self._config.judge.selection.value
+        judge_id = getattr(judge, "judge_id", None)
+        if judge_id != expected:
+            raise ValueError(
+                f"judge id {judge_id!r} does not match configured "
+                f"selection {expected!r}"
+            )
+        self._config_digest = _routing_config_digest(self._config)
 
     async def route(self, request: RoutingRequest) -> RouteDecision:
         started = time.perf_counter()
@@ -853,6 +884,7 @@ def _known_context_limit(
 
 
 def _routing_config_digest(config: RouterConfig) -> str:
+    """Hash the routing configuration for provenance; this is not a signature."""
     payload = config.model_dump(
         mode="json", exclude={"judge": {"jev": {"api_key_env"}}}
     )

@@ -12,7 +12,7 @@ import pytest
 from modelmux.config import JevJudgeConfig, RouterConfig
 from modelmux.judges import build_judge
 from modelmux.judges.base import JudgeError
-from modelmux.judges.jev import JevTaskJudge
+from modelmux.judges.jev import MAX_RESPONSE_BYTES, JevTaskJudge
 from modelmux.router import (
     EffectiveConfiguration,
     EventKind,
@@ -22,15 +22,16 @@ from modelmux.router import (
     Router,
     RoutingRequest,
 )
-from modelmux.state import MessageRecord, extract_task_state
+from modelmux.state import MessageRecord, ToolRecord, extract_task_state
 from modelmux.types import (
+    MAX_IDENTIFIER_CHARS,
     QUESTION_VERSION,
     JudgeUsage,
     ObservationKind,
     TaskState,
 )
 
-_ENV = "MODELMUX_TEST_JEV_API_KEY"
+_ENV = "MODELMUX_JEV_TEST_KEY"
 _ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 
@@ -70,7 +71,7 @@ def _response(**overrides: object) -> dict[str, object]:
 
 
 def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
 
 
 def _config(*, deadline_ms: int = 1500) -> RouterConfig:
@@ -161,6 +162,88 @@ async def test_documented_request_and_answer_normalization(
     ]
 
 
+async def test_rejects_client_that_inherits_environment() -> None:
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ValueError, match="trust_env=False"):
+            JevTaskJudge(JevJudgeConfig(api_key_env=_ENV), client)
+
+
+@pytest.mark.parametrize("key", ["", "   ", "abc\r\nX-Injected: yes"])
+async def test_malformed_credentials_do_not_send_a_request(
+    monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    monkeypatch.setenv(_ENV, key)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=_response())
+
+    async with _client(handler) as client:
+        judge = JevTaskJudge(JevJudgeConfig(api_key_env=_ENV), client)
+        with pytest.raises(JudgeError, match="empty or malformed"):
+            await judge.evaluate(_state())
+
+    assert calls == 0
+
+
+async def test_oversized_response_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_ENV, "test-key")
+    content = b"x" * (MAX_RESPONSE_BYTES + 1)
+
+    async with _client(lambda request: httpx.Response(200, content=content)) as client:
+        judge = JevTaskJudge(JevJudgeConfig(api_key_env=_ENV), client)
+        with pytest.raises(JudgeError, match="size limit"):
+            await judge.evaluate(_state())
+
+
+async def test_oversized_model_id_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_ENV, "test-key")
+    payload = _response(model="m" * (MAX_IDENTIFIER_CHARS + 1))
+
+    async with _client(lambda request: httpx.Response(200, json=payload)) as client:
+        judge = JevTaskJudge(JevJudgeConfig(api_key_env=_ENV), client)
+        with pytest.raises(JudgeError, match="expected schema"):
+            await judge.evaluate(_state())
+
+
+async def test_privacy_switches_exclude_state_categories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_ENV, "test-key")
+    state = extract_task_state(
+        [
+            MessageRecord(role="user", text="latest"),
+            MessageRecord(role="assistant", text="history"),
+        ],
+        instructions=[MessageRecord(role="system", text="instruction")],
+        tools=[ToolRecord(name="bash", text="tool output")],
+    )
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_response())
+
+    config = JevJudgeConfig(
+        api_key_env=_ENV,
+        include_instructions=False,
+        include_history=False,
+        include_tool_excerpts=False,
+    )
+    async with _client(handler) as client:
+        judge = JevTaskJudge(config, client)
+        await judge.evaluate(state)
+
+    body = json.loads(captured[0].content)
+    assert sorted(body["state"]) == ["latest_user"]
+
+
 async def test_missing_credentials_raise_judge_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -217,7 +300,7 @@ async def test_malformed_responses_raise_judge_error(
 async def test_http_status_errors_are_safe_judge_errors(
     monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
-    monkeypatch.setenv(_ENV, "super-secret-key")
+    monkeypatch.setenv(_ENV, "test-only-not-real")
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, json={"error": "raw-body-secret"})
@@ -230,7 +313,7 @@ async def test_http_status_errors_are_safe_judge_errors(
     message = str(excinfo.value)
     assert str(status) in message
     assert "raw-body-secret" not in message
-    assert "super-secret-key" not in message
+    assert "test-only-not-real" not in message
 
 
 async def test_connect_error_is_a_safe_judge_error(
@@ -286,7 +369,7 @@ async def test_invalid_json_is_a_safe_judge_error(
 async def test_redirects_are_not_followed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(_ENV, "super-secret-key")
+    monkeypatch.setenv(_ENV, "test-only-not-real")
     urls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -298,7 +381,9 @@ async def test_redirects_are_not_followed(
         )
 
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), follow_redirects=True
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+        trust_env=False,
     ) as client:
         judge = JevTaskJudge(JevJudgeConfig(api_key_env=_ENV), client)
         with pytest.raises(JudgeError) as excinfo:
@@ -307,7 +392,7 @@ async def test_redirects_are_not_followed(
     assert urls == [_ENDPOINT]
     message = str(excinfo.value)
     assert "302" in message
-    assert "super-secret-key" not in message
+    assert "test-only-not-real" not in message
     assert "raw-response-secret" not in message
     assert "redirect.example" not in message
     assert "now diagnose the flaky test" not in message
@@ -381,7 +466,9 @@ async def test_router_deadline_cancels_jev_request(
     current = EffectiveConfiguration(
         profile_id="normal", provider="provider-a", model="model-normal"
     )
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False
+    ) as client:
         judge = JevTaskJudge(JevJudgeConfig(api_key_env=_ENV), client)
         decision = await Router(_config(deadline_ms=20), judge).route(
             _request(current=current)

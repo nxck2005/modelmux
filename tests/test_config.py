@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from modelmux.config import (
     ComparisonOperator,
@@ -13,7 +14,9 @@ from modelmux.config import (
     OutputLimits,
     RouterConfig,
     load_config,
+    validation_problems,
 )
+from modelmux.types import TaskState
 
 EXAMPLE_CONFIG = Path(__file__).resolve().parents[1] / "examples" / "router.toml"
 
@@ -36,7 +39,7 @@ rank = 1
 capabilities = ["text"]
 """
 
-SECRET = "sk-live-0123456789abcdef"
+SECRET = "test-secret-not-real"
 
 
 def _load(tmp_path: Path, text: str) -> RouterConfig:
@@ -195,14 +198,14 @@ def test_requires_selected_judge_section(
 def test_jev_credentials_are_names_not_resolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("MODELMUX_TEST_JEV_API_KEY", raising=False)
+    monkeypatch.delenv("MODELMUX_JEV_TEST_KEY", raising=False)
     text = BASE_CONFIG.replace('selection = "rules"', 'selection = "jev"')
-    text += '\n[judge.jev]\napi_key_env = "MODELMUX_TEST_JEV_API_KEY"\n'
+    text += '\n[judge.jev]\napi_key_env = "MODELMUX_JEV_TEST_KEY"\n'
 
     config = _load(tmp_path, text)
 
     assert config.judge.jev is not None
-    assert config.judge.jev.api_key_env == "MODELMUX_TEST_JEV_API_KEY"
+    assert config.judge.jev.api_key_env == "MODELMUX_JEV_TEST_KEY"
     assert config.judge.jev.model == "jev-latest"
 
 
@@ -231,3 +234,138 @@ def test_error_messages_do_not_echo_config_values(tmp_path: Path, text: str) -> 
 
     assert SECRET not in str(excinfo.value)
     assert excinfo.value.__suppress_context__ is True
+
+
+def test_rejects_unscoped_jev_credential_name(tmp_path: Path) -> None:
+    text = BASE_CONFIG.replace('selection = "rules"', 'selection = "jev"')
+    text += '\n[judge.jev]\napi_key_env = "OPENAI_API_KEY"\n'
+
+    with pytest.raises(ConfigError) as excinfo:
+        _load(tmp_path, text)
+
+    assert "judge.jev.api_key_env" in str(excinfo.value)
+
+
+def test_rejects_deadline_above_maximum(tmp_path: Path) -> None:
+    text = BASE_CONFIG.replace(
+        'selection = "rules"', 'selection = "rules"\ndeadline_ms = 600001'
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        _load(tmp_path, text)
+
+    assert "judge.deadline_ms" in str(excinfo.value)
+
+
+def test_rejects_too_many_profiles() -> None:
+    data = {
+        "version": 1,
+        "router": {
+            "default": "p0",
+            "judgment_fallback": "p0",
+            "compatibility_fallback": "p0",
+            "economy": "p0",
+        },
+        "judge": {"selection": "rules"},
+        "profiles": {
+            f"p{index}": {
+                "provider": "provider",
+                "model": "model",
+                "rank": 0,
+                "capabilities": [],
+            }
+            for index in range(129)
+        },
+    }
+
+    with pytest.raises(ValidationError):
+        RouterConfig.model_validate(data)
+
+
+def test_rejects_too_many_policy_rules() -> None:
+    data = {
+        "version": 1,
+        "router": {
+            "default": "normal",
+            "judgment_fallback": "normal",
+            "compatibility_fallback": "normal",
+            "economy": "normal",
+        },
+        "judge": {"selection": "rules"},
+        "profiles": {
+            "normal": {
+                "provider": "provider",
+                "model": "model",
+                "rank": 0,
+                "capabilities": [],
+            }
+        },
+        "policy": {
+            "rules": [
+                {
+                    "id": f"rule-{index}",
+                    "route": "normal",
+                    "conditions": [{"field": "routine", "op": "gte", "value": 0.0}],
+                }
+                for index in range(257)
+            ]
+        },
+    }
+
+    with pytest.raises(ValidationError):
+        RouterConfig.model_validate(data)
+
+
+def test_invalid_utf8_is_a_config_error(tmp_path: Path) -> None:
+    path = tmp_path / "router.toml"
+    path.write_bytes(b'version = 1\n[router]\ndefault = "\xff\xfe"\n')
+
+    with pytest.raises(ConfigError, match="not valid UTF-8"):
+        load_config(path)
+
+
+def test_nul_path_is_a_config_error() -> None:
+    with pytest.raises(ConfigError, match="invalid configuration path"):
+        load_config(Path("bad\x00path.toml"))
+
+
+def test_rejects_oversized_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("modelmux.config.MAX_CONFIG_BYTES", 10)
+
+    with pytest.raises(ConfigError, match="exceeds 10 bytes"):
+        _load(tmp_path, BASE_CONFIG)
+
+
+def test_validation_problems_do_not_echo_input() -> None:
+    payload = {
+        "latest_user": None,
+        "instructions": [],
+        "history": [
+            {
+                "source": "user",
+                "source_truncated": False,
+                "text": SECRET * 200,
+                "truncated": False,
+                "omitted_chars": 0,
+            }
+        ],
+        "tool_excerpts": [],
+        "instructions_omitted": 0,
+        "history_omitted": 0,
+        "tools_omitted": 0,
+        "message_count": 1,
+        "input_bytes": 1,
+        "tool_count": 0,
+        "tool_names": [],
+        "tool_names_omitted": 0,
+        "tool_names_truncated": 0,
+    }
+
+    with pytest.raises(ValidationError) as excinfo:
+        TaskState.model_validate(payload)
+
+    problems = " ".join(validation_problems(excinfo.value))
+    assert SECRET not in problems
+    assert "history text exceeds" in problems

@@ -18,10 +18,24 @@ from pydantic import (
     model_validator,
 )
 
-from modelmux.types import Identifier, NonNegativeInt, Score
+from modelmux.types import (
+    Identifier,
+    NonNegativeInt,
+    OutputTokens,
+    Score,
+    StrictBool,
+)
 
-EnvVarName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
+EnvVarName = Annotated[
+    str,
+    StringConstraints(pattern=r"^(MODELMUX_JEV_|JEV_)[A-Za-z0-9_]+$"),
+]
 PositiveInt = Annotated[int, Field(strict=True, ge=1)]
+DeadlineMs = Annotated[int, Field(strict=True, ge=1, le=600_000)]
+
+MAX_CONFIG_BYTES = 1_048_576
+MAX_PROFILES = 128
+MAX_POLICY_RULES = 256
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
 
@@ -69,8 +83,8 @@ class OutputLimits(BaseModel):
 
     model_config = _STRICT
 
-    default: PositiveInt | None = None
-    max: PositiveInt | None = None
+    default: OutputTokens | None = None
+    max: OutputTokens | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> OutputLimits:
@@ -122,7 +136,7 @@ class PolicyConfig(BaseModel):
 
     model_config = _STRICT
 
-    rules: tuple[PolicyRule, ...] = ()
+    rules: Annotated[tuple[PolicyRule, ...], Field(max_length=MAX_POLICY_RULES)] = ()
 
     @model_validator(mode="after")
     def _unique_rule_ids(self) -> PolicyConfig:
@@ -174,14 +188,23 @@ class JevJudgeConfig(BaseModel):
     """Jev judge settings.
 
     ``api_key_env`` is the name of the environment variable holding the bearer
-    credential. Configuration loading never reads that variable; the Jev judge
-    resolves it when instantiated.
+    credential. The name must be scoped to this project or the judge
+    (``MODELMUX_JEV_*`` or ``JEV_*``) so a copied configuration cannot send an
+    unrelated secret to the remote judge. Configuration loading never reads that
+    variable; the Jev judge resolves it when instantiated.
+
+    The ``include_*`` switches control which task-state categories leave the
+    machine. They default to true to preserve judge quality; disable categories
+    that may contain secrets or PII.
     """
 
     model_config = _STRICT
 
     api_key_env: EnvVarName
     model: Identifier = "jev-latest"
+    include_instructions: StrictBool = True
+    include_history: StrictBool = True
+    include_tool_excerpts: StrictBool = True
 
 
 class JudgeConfig(BaseModel):
@@ -190,7 +213,7 @@ class JudgeConfig(BaseModel):
     model_config = _STRICT
 
     selection: JudgeKind
-    deadline_ms: PositiveInt = 1500
+    deadline_ms: DeadlineMs = 1500
     static: StaticJudgeConfig | None = None
     jev: JevJudgeConfig | None = None
 
@@ -213,7 +236,7 @@ class RouterConfig(BaseModel):
     version: Literal[1]
     router: RouterReferences
     judge: JudgeConfig
-    profiles: dict[Identifier, ModelProfile]
+    profiles: Annotated[dict[Identifier, ModelProfile], Field(max_length=MAX_PROFILES)]
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
 
     @model_validator(mode="after")
@@ -242,8 +265,14 @@ def load_config(path: str | Path) -> RouterConfig:
     """Load and validate a TOML router configuration file."""
     config_path = Path(path)
     try:
+        if config_path.stat().st_size > MAX_CONFIG_BYTES:
+            raise ConfigError(
+                [f"{config_path}: configuration file exceeds {MAX_CONFIG_BYTES} bytes"]
+            )
         with config_path.open("rb") as file:
             raw = tomllib.load(file)
+    except ConfigError:
+        raise
     except OSError as exc:
         reason = exc.strerror or "unreadable file"
         raise ConfigError(
@@ -253,11 +282,17 @@ def load_config(path: str | Path) -> RouterConfig:
         raise ConfigError(
             [f"{config_path}: invalid TOML syntax at {_error_location(exc)}"]
         ) from None
+    except UnicodeDecodeError:
+        raise ConfigError(
+            [f"{config_path}: configuration file is not valid UTF-8"]
+        ) from None
+    except ValueError:
+        raise ConfigError([f"{config_path}: invalid configuration path"]) from None
     try:
         return RouterConfig.model_validate(raw)
     except ValidationError as exc:
         raise ConfigError(
-            [f"{config_path}: {problem}" for problem in _problems(exc)]
+            [f"{config_path}: {problem}" for problem in validation_problems(exc)]
         ) from None
 
 
@@ -268,7 +303,8 @@ def _error_location(exc: tomllib.TOMLDecodeError) -> str:
     return f"line {match.group(1)}, column {match.group(2)}"
 
 
-def _problems(exc: ValidationError) -> list[str]:
+def validation_problems(exc: ValidationError) -> list[str]:
+    """Render validation errors without echoing input values."""
     problems: list[str] = []
     for error in exc.errors():
         location = ".".join(str(part) for part in error["loc"])

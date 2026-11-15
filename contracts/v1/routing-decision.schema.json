@@ -5,16 +5,19 @@
       "description": "A fully resolved profile/provider/model/effort/output selection.",
       "properties": {
         "profile_id": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Profile Id",
           "type": "string"
         },
         "provider": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Provider",
           "type": "string"
         },
         "model": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Model",
           "type": "string"
@@ -22,6 +25,7 @@
         "reasoning_effort": {
           "anyOf": [
             {
+              "maxLength": 256,
               "minLength": 1,
               "type": "string"
             },
@@ -35,6 +39,7 @@
         "output_limit": {
           "anyOf": [
             {
+              "maximum": 1000000,
               "minimum": 1,
               "type": "integer"
             },
@@ -65,12 +70,14 @@
           "$ref": "#/$defs/ObservationKind"
         },
         "judge_id": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Judge Id",
           "type": "string"
         },
         "question_version": {
           "default": "task-profile-v1",
+          "maxLength": 256,
           "minLength": 1,
           "title": "Question Version",
           "type": "string"
@@ -78,6 +85,7 @@
         "model_id": {
           "anyOf": [
             {
+              "maxLength": 256,
               "minLength": 1,
               "type": "string"
             },
@@ -343,24 +351,28 @@
       }
     }
   ],
-  "description": "A proposed routing action for the caller to apply.\n\nA decision never claims that a switch happened; only an ApplicationResult\nwith status ``applied`` acknowledges the actual effective configuration.\n``observation`` is the exact judge observation used for this decision and\nis None when no judge was called. ``config_digest`` identifies the routing\nconfiguration that produced the decision.",
+  "description": "A proposed routing action for the caller to apply.\n\nA decision never claims that a switch happened; only an ApplicationResult\nwith status ``applied`` acknowledges the actual effective configuration.\n``observation`` is the exact judge observation used for this decision and\nis None when no judge was called. ``config_digest`` identifies the routing\nconfiguration that produced the decision; it is provenance, not a signature.",
   "properties": {
     "decision_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "Decision Id",
       "type": "string"
     },
     "request_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "Request Id",
       "type": "string"
     },
     "session_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "Session Id",
       "type": "string"
     },
     "user_turn_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "User Turn Id",
       "type": "string"
@@ -396,6 +408,7 @@
     "matched_rule_id": {
       "anyOf": [
         {
+          "maxLength": 256,
           "minLength": 1,
           "type": "string"
         },

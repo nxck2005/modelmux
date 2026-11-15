@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import unicodedata
 from enum import StrEnum
 from typing import Annotated, Final
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -14,8 +16,29 @@ from pydantic import (
     model_validator,
 )
 
-Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+MAX_IDENTIFIER_CHARS = 256
+MAX_INPUT_RECORD_CHARS = 1_000_000
+MAX_OUTPUT_TOKENS = 1_000_000
+
+
+def _no_control_characters(value: str) -> str:
+    if any(unicodedata.category(char) in {"Cc", "Cf"} for char in value):
+        raise ValueError("must not contain control characters")
+    return value
+
+
+Identifier = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_IDENTIFIER_CHARS,
+    ),
+    AfterValidator(_no_control_characters),
+]
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+StrictBool = Annotated[bool, Field(strict=True)]
+OutputTokens = Annotated[int, Field(strict=True, ge=1, le=MAX_OUTPUT_TOKENS)]
 
 LATEST_USER_CHARS = 6_000
 INSTRUCTIONS_CHARS = 2_000
@@ -35,6 +58,7 @@ MAX_STATE_BYTES = 128 * 1024
 SourceLabel = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_SOURCE_CHARS),
+    AfterValidator(_no_control_characters),
 ]
 
 
@@ -86,9 +110,9 @@ class BoundedText(BaseModel):
     model_config = _STRICT
 
     source: SourceLabel
-    source_truncated: bool
+    source_truncated: StrictBool
     text: Annotated[str, Field(max_length=LATEST_USER_CHARS)]
-    truncated: bool
+    truncated: StrictBool
     omitted_chars: NonNegativeInt
 
 

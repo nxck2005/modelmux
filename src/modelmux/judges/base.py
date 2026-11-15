@@ -18,6 +18,9 @@ class TaskJudge(Protocol):
     """Evaluates bounded task state.
 
     A judge never receives the model catalog and never recommends a model.
+    ``judge_id`` must match the configured judge selection.
     """
+
+    judge_id: str
 
     async def evaluate(self, state: TaskState) -> JudgeResult: ...

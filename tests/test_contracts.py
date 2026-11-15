@@ -111,6 +111,7 @@ _INVALID_DECISIONS = [
     pytest.param(
         _decision(action="keep", notify_on_applied=True), id="keep-notify-true"
     ),
+    pytest.param(_decision(notify_on_applied=1), id="coerced-notify"),
     pytest.param(_decision(elapsed_ms=-1.0), id="negative-elapsed"),
 ]
 
@@ -164,6 +165,10 @@ _INVALID_REQUESTS = [
     ),
     pytest.param(_request(recovery_used=True), id="recovery-on-new-turn"),
     pytest.param(_request(task_state=None), id="new-turn-without-state"),
+    pytest.param(_request(request_id="r" * 300), id="oversized-identifier"),
+    pytest.param(
+        _request(safe_to_apply_before_generation=1), id="coerced-safety-boolean"
+    ),
 ]
 
 

@@ -33,18 +33,46 @@ Verified against the official documentation on 2026-09-18:
   `latest_user`, `instructions`, `history`, and `tool_excerpts`, preserving
   each block's source label. The judge never receives the model catalog,
   profile IDs, tier names, or router metadata.
-- Missing credentials, transport and HTTP failures, invalid JSON, and
-  responses that do not match the documented schema raise `JudgeError`. The
-  Router turns those into its normal fallback behavior; unrelated
-  static/rules use never reads the Jev credential.
+- Missing, empty, or malformed credentials, transport and HTTP failures,
+  oversized responses, invalid JSON, and responses that do not match the
+  documented schema raise `JudgeError`. The Router turns those into its normal
+  fallback behavior; unrelated static/rules use never reads the Jev credential.
 - Exactly one request is made. There are no retries and no separate inner
   deadline: the Router's `deadline_ms` bounds the whole evaluation and cancels
   the in-flight request. The injected `httpx.AsyncClient` is owned by the
-  caller and supplies transport timeouts.
+  caller and supplies transport timeouts; it must be created with
+  `trust_env=False`, and the constructor rejects a client that does not.
 - Usage token counts are reported when present; absent or unknown values stay
   `None`. The documented response has no cost field, so cost is not reported.
 - Prompts, credentials, response bodies, and raw HTTP errors are not logged or
   surfaced in error messages.
+
+## Privacy and security
+
+- When this judge is selected, the request carries the latest user text (up to
+  6,000 characters), instructions (2,000), history (3,000), and tool excerpts
+  (1,000) to `https://api.typesafe.ai/v1/systemone`, plus the configured model
+  name and the four fixed questions. Source labels travel with the blocks.
+- Instructions, history, and tool excerpts can be excluded with
+  `judge.jev.include_instructions`, `include_history`, and
+  `include_tool_excerpts` (all default true). The latest user text is always
+  included because it is the task being judged.
+- The credential variable must be named `MODELMUX_JEV_*` or `JEV_*`. This
+  prevents a copied configuration from naming an unrelated secret such as
+  `OPENAI_API_KEY` or `AWS_SECRET_ACCESS_KEY`; the value would otherwise be
+  sent to TypeSafe as the bearer token.
+- The injected client must use `trust_env=False`; otherwise environment proxy
+  and CA-bundle settings could intercept the key and task content. The
+  constructor rejects a client that inherits the environment. Use
+  `verify=True` and a finite timeout.
+- The adapter caps the response at 64 KiB and validates every answer as a Noul
+  score in [0, 1]. Redirects are disabled per request, so a redirect cannot
+  forward the key or state to another host.
+- Cancellation stops local waiting but cannot retract a request already sent.
+  Prompt injection can influence an LLM judge and therefore model selection;
+  use a local judge for high-consequence or secret-bearing sessions.
+- The endpoint is fixed and is not configurable. Do not make it configurable
+  without an allowlist and a redirect re-test.
 
 ## Limitations
 

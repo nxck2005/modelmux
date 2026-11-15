@@ -10,8 +10,11 @@ Endpoint ``POST https://api.typesafe.ai/v1/systemone`` with a bearer
 credential. A Noul answer is ``{"type": "noul", "noul": <0..1>}`` and carries
 no confidence property. TypeSafe-specific shapes stay inside this module.
 
-The injected ``httpx.AsyncClient`` is owned by the caller. Missing credentials,
-transport or HTTP failures, invalid JSON, and responses that do not match the
+The injected ``httpx.AsyncClient`` is owned by the caller and must be created
+with ``trust_env=False`` so environment proxy and CA settings cannot intercept
+the bearer key or task content; the constructor rejects a client that inherits
+the environment. Missing or malformed credentials, transport or HTTP failures,
+oversized responses, invalid JSON, and responses that do not match the
 documented schema raise ``JudgeError``; the Router applies its normal fallback
 behavior. No retries and no separate deadline are implemented here: the
 Router's ``deadline_ms`` bounds the whole evaluation. Redirects are disabled
@@ -21,11 +24,12 @@ forward task state to another host.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
 
 from modelmux.config import JevJudgeConfig
 from modelmux.judges.base import JudgeError
@@ -43,6 +47,7 @@ from modelmux.types import (
 
 _ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 _JUDGE_ID = "jev"
+MAX_RESPONSE_BYTES = 64 * 1024
 
 _QUESTIONS: dict[str, dict[str, str]] = {
     "reasoning_demand": {
@@ -116,50 +121,66 @@ class JevTaskJudge:
     judge_id = _JUDGE_ID
 
     def __init__(self, config: JevJudgeConfig, client: httpx.AsyncClient) -> None:
+        if client.trust_env:
+            raise ValueError(
+                "jev judge requires an httpx.AsyncClient created with trust_env=False"
+            )
         self._config = config
         self._client = client
-        self._api_key = os.environ.get(config.api_key_env)
+        key = os.environ.get(config.api_key_env)
+        self._api_key = SecretStr(key) if key is not None else None
 
     async def evaluate(self, state: TaskState) -> JudgeResult:
         if self._api_key is None:
             raise JudgeError(
                 f"credential environment variable {self._config.api_key_env!r} is not set"
             )
+        api_key = self._api_key.get_secret_value()
+        if not api_key.strip() or any(
+            ord(char) < 0x20 or ord(char) == 0x7F for char in api_key
+        ):
+            raise JudgeError("configured credential is empty or malformed")
         try:
-            response = await self._client.post(
+            async with self._client.stream(
+                "POST",
                 _ENDPOINT,
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=_request_payload(self._config.model, state),
+                headers={"Authorization": f"Bearer {api_key.strip()}"},
+                json=_request_payload(self._config, state),
                 follow_redirects=False,
-            )
-            response.raise_for_status()
+            ) as response:
+                response.raise_for_status()
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
+                        raise JudgeError("jev response exceeded the size limit")
+                    body.extend(chunk)
         except httpx.HTTPError as exc:
             raise JudgeError(_http_error_message(exc)) from None
         try:
-            payload = response.json()
+            payload = json.loads(body)
         except ValueError:
             raise JudgeError("jev response was not valid JSON") from None
         return _result(payload)
 
 
-def _request_payload(model: str, state: TaskState) -> dict[str, object]:
+def _request_payload(config: JevJudgeConfig, state: TaskState) -> dict[str, object]:
     return {
-        "state": _state_payload(state),
-        "model": model,
+        "state": _state_payload(config, state),
+        "model": config.model,
         "questions": _QUESTIONS,
     }
 
 
-def _state_payload(state: TaskState) -> dict[str, object]:
+def _state_payload(config: JevJudgeConfig, state: TaskState) -> dict[str, object]:
     payload: dict[str, object] = {}
     if state.latest_user is not None:
         payload["latest_user"] = state.latest_user.text
-    for key, blocks in (
-        ("instructions", state.instructions),
-        ("history", state.history),
-        ("tool_excerpts", state.tool_excerpts),
+    for key, blocks, include in (
+        ("instructions", state.instructions, config.include_instructions),
+        ("history", state.history, config.include_history),
+        ("tool_excerpts", state.tool_excerpts, config.include_tool_excerpts),
     ):
-        if blocks:
+        if include and blocks:
             payload[key] = [
                 {"source": block.source, "text": block.text} for block in blocks
             ]

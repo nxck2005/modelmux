@@ -71,8 +71,9 @@ asks TypeSafe's System One API the four semantic questions in one request and
 reports probability observations. No judge sees the model catalog, profile
 IDs, or tier names, and none recommends a model. The Jev adapter and its
 verified contract are documented in [docs/jev.md](docs/jev.md); it needs an
-injected `httpx.AsyncClient` and the configured credential environment
-variable, and falls back through the Router when unavailable.
+injected `httpx.AsyncClient` created with `trust_env=False` and a credential
+environment variable scoped `MODELMUX_JEV_*` or `JEV_*`, and falls back through
+the Router when unavailable.
 
 `Router` evaluates one `TaskState` with an injected judge and returns a
 `RouteDecision` with action `keep`, `switch`, `defer`, or `stop`. Decisions are
@@ -87,6 +88,46 @@ output limit against the configured profile and reported facts. Ineligible
 candidates use one checked compatibility fallback, which may not downgrade or
 replace a valid current route; a judge failure retains the current route or
 uses the judgment fallback; tool continuations bypass the judge.
+
+## Security and privacy
+
+The `static` and `rules` judges are local and never send task content off the
+machine. Selecting `jev` sends the latest user text, instructions, history, and
+tool excerpts (up to 12,000 characters total) to
+`https://api.typesafe.ai/v1/systemone` with the configured bearer key. Tool
+output and instructions can contain secrets or PII; set
+`include_instructions`, `include_history`, or `include_tool_excerpts` to `false`
+in `[judge.jev]` if those categories must not leave the machine. The credential
+variable must be named `MODELMUX_JEV_*` or `JEV_*`; a copied configuration
+cannot point the adapter at an unrelated cloud secret.
+
+The injected Jev client controls TLS, proxy, and timeout behavior. Create it
+with hardened settings and keep ownership explicit:
+
+```python
+import httpx
+
+client = httpx.AsyncClient(
+    trust_env=False,
+    follow_redirects=False,
+    timeout=httpx.Timeout(5.0),
+)
+judge = build_judge(config.judge, client=client)
+# The caller owns the client and must close it when finished.
+```
+
+The adapter rejects a client that inherits environment proxy/CA settings and
+caps the judge response at 64 KiB. The Router's `deadline_ms` bounds the
+evaluation. Prompt injection remains a measured limitation: an LLM judge can be
+influenced by task text, and the policy trusts its scores; use a local judge for
+high-consequence or secret-bearing sessions. The core also trusts the caller's
+reported availability, state, safety, and history facts; a service must
+authenticate the caller before treating them as operational input. Decisions
+carry scores, judge identity, and a configuration digest (provenance, not a
+signature) but never prompt text. Application results are proposals until the
+caller reports `applied`. See [SECURITY.md](SECURITY.md) for the reporting
+policy and [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) for the threat model
+and remaining limitations.
 
 ## Versioned contracts
 

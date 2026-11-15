@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from modelmux.types import (
     HISTORY_CHARS,
     INSTRUCTIONS_CHARS,
     LATEST_USER_CHARS,
     MAX_HISTORY_RECORDS,
+    MAX_INPUT_RECORD_CHARS,
     MAX_INSTRUCTION_RECORDS,
     MAX_SOURCE_CHARS,
     MAX_TOOL_NAMES,
@@ -33,7 +35,7 @@ class MessageRecord(BaseModel):
     model_config = _STRICT
 
     role: Identifier
-    text: str
+    text: Annotated[str, Field(max_length=MAX_INPUT_RECORD_CHARS)]
 
 
 class ToolRecord(BaseModel):
@@ -42,7 +44,7 @@ class ToolRecord(BaseModel):
     model_config = _STRICT
 
     name: Identifier
-    text: str
+    text: Annotated[str, Field(max_length=MAX_INPUT_RECORD_CHARS)]
 
 
 def extract_task_state(

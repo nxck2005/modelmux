@@ -44,16 +44,19 @@
       "description": "A fully resolved profile/provider/model/effort/output selection.",
       "properties": {
         "profile_id": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Profile Id",
           "type": "string"
         },
         "provider": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Provider",
           "type": "string"
         },
         "model": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Model",
           "type": "string"
@@ -61,6 +64,7 @@
         "reasoning_effort": {
           "anyOf": [
             {
+              "maxLength": 256,
               "minLength": 1,
               "type": "string"
             },
@@ -74,6 +78,7 @@
         "output_limit": {
           "anyOf": [
             {
+              "maximum": 1000000,
               "minimum": 1,
               "type": "integer"
             },
@@ -108,6 +113,7 @@
       "description": "Caller-reported availability and factual control support for a profile.\n\n``reasoning_efforts``, ``max_output_tokens``, ``context_limit``, and\n``measured_input_tokens`` are None when the caller does not know the fact.\n``measured_input_tokens`` is a measurement for this profile only and must\nnot be copied from a different model.",
       "properties": {
         "profile_id": {
+          "maxLength": 256,
           "minLength": 1,
           "title": "Profile Id",
           "type": "string"
@@ -115,9 +121,11 @@
         "capabilities": {
           "default": [],
           "items": {
+            "maxLength": 256,
             "minLength": 1,
             "type": "string"
           },
+          "maxItems": 64,
           "title": "Capabilities",
           "type": "array",
           "uniqueItems": true
@@ -126,9 +134,11 @@
           "anyOf": [
             {
               "items": {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },
+              "maxItems": 64,
               "type": "array",
               "uniqueItems": true
             },
@@ -142,6 +152,7 @@
         "max_output_tokens": {
           "anyOf": [
             {
+              "maximum": 1000000,
               "minimum": 1,
               "type": "integer"
             },
@@ -381,24 +392,28 @@
       }
     }
   ],
-  "description": "A harness-neutral routing request.\n\nCorrelation fields are echoed into the decision. A decision is a proposal\nonly; the caller owns the actually applied configuration. ``None`` token\nor support facts are unknown, not zero.\n\nFor ``application_failed`` events the caller must identify the effective\nselection whose application was rejected (``rejected_effective``) and set\n``recovery_used=True`` when the failed application was already a\ncompatibility-fallback recovery proposed by the core. The core never\nre-proposes ``rejected_effective`` and stops once ``recovery_used``.",
+  "description": "A harness-neutral routing request.\n\nCorrelation fields are echoed into the decision. A decision is a proposal\nonly; the caller owns the actually applied configuration. ``None`` token\nor support facts are unknown, not zero.\n\nFor ``application_failed`` events the caller must identify the effective\nselection whose application was rejected (``rejected_effective``) and set\n``recovery_used=True`` when the failed application was already a\ncompatibility-fallback recovery proposed by the core. The core never\nre-proposes ``rejected_effective`` and stops once ``recovery_used``.\n\nThe caller is trusted to report availability, task-state, safety, and\nhistory facts. A service must authenticate the caller before treating those\nfacts as operational input; prompt text is never authorization.",
   "properties": {
     "request_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "Request Id",
       "type": "string"
     },
     "integration_instance_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "Integration Instance Id",
       "type": "string"
     },
     "session_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "Session Id",
       "type": "string"
     },
     "user_turn_id": {
+      "maxLength": 256,
       "minLength": 1,
       "title": "User Turn Id",
       "type": "string"
@@ -436,6 +451,7 @@
     "last_applied_decision_id": {
       "anyOf": [
         {
+          "maxLength": 256,
           "minLength": 1,
           "type": "string"
         },
@@ -451,15 +467,18 @@
       "items": {
         "$ref": "#/$defs/ProfileAvailability"
       },
+      "maxItems": 64,
       "title": "Available Profiles",
       "type": "array"
     },
     "required_capabilities": {
       "default": [],
       "items": {
+        "maxLength": 256,
         "minLength": 1,
         "type": "string"
       },
+      "maxItems": 64,
       "title": "Required Capabilities",
       "type": "array",
       "uniqueItems": true
@@ -467,6 +486,7 @@
     "required_output_tokens": {
       "anyOf": [
         {
+          "maximum": 1000000,
           "minimum": 1,
           "type": "integer"
         },
@@ -490,6 +510,7 @@
     "application_failure_code": {
       "anyOf": [
         {
+          "maxLength": 256,
           "minLength": 1,
           "type": "string"
         },
