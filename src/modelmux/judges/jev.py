@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
 from typing import Literal
 
 import httpx
@@ -137,7 +138,7 @@ class JevTaskJudge:
             )
         api_key = self._api_key.get_secret_value()
         if not api_key.strip() or any(
-            ord(char) < 0x20 or ord(char) == 0x7F for char in api_key
+            unicodedata.category(char) in {"Cc", "Cf"} for char in api_key
         ):
             raise JudgeError("configured credential is empty or malformed")
         try:
